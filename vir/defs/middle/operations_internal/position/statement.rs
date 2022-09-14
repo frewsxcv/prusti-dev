@@ -6,8 +6,10 @@ impl Positioned for Statement {
         match self {
             Self::Comment(statement) => statement.position(),
             Self::OldLabel(statement) => statement.position(),
-            Self::Inhale(statement) => statement.position(),
-            Self::Exhale(statement) => statement.position(),
+            Self::InhalePredicate(statement) => statement.position(),
+            Self::ExhalePredicate(statement) => statement.position(),
+            Self::InhaleExpression(statement) => statement.position(),
+            Self::ExhaleExpression(statement) => statement.position(),
             Self::Havoc(statement) => statement.position(),
             Self::GhostHavoc(statement) => statement.position(),
             Self::Assume(statement) => statement.position(),
@@ -27,6 +29,9 @@ impl Positioned for Statement {
             Self::Assign(statement) => statement.position(),
             Self::GhostAssign(statement) => statement.position(),
             Self::SetUnionVariant(statement) => statement.position(),
+            // Self::Pack(statement) => statement.position(),
+            // Self::Unpack(statement) => statement.position(),
+            Self::RestoreRawBorrowed(statement) => statement.position(),
             Self::Consume(statement) => statement.position(),
             Self::NewLft(statement) => statement.position(),
             Self::EndLft(statement) => statement.position(),
@@ -56,13 +61,25 @@ impl Positioned for OldLabel {
     }
 }
 
-impl Positioned for Inhale {
+impl Positioned for InhalePredicate {
     fn position(&self) -> Position {
         self.position
     }
 }
 
-impl Positioned for Exhale {
+impl Positioned for ExhalePredicate {
+    fn position(&self) -> Position {
+        self.position
+    }
+}
+
+impl Positioned for InhaleExpression {
+    fn position(&self) -> Position {
+        self.position
+    }
+}
+
+impl Positioned for ExhaleExpression {
     fn position(&self) -> Position {
         self.position
     }
@@ -177,6 +194,24 @@ impl Positioned for GhostAssign {
 }
 
 impl Positioned for SetUnionVariant {
+    fn position(&self) -> Position {
+        self.position
+    }
+}
+
+// impl Positioned for Pack {
+//     fn position(&self) -> Position {
+//         self.position
+//     }
+// }
+
+// impl Positioned for Unpack {
+//     fn position(&self) -> Position {
+//         self.position
+//     }
+// }
+
+impl Positioned for RestoreRawBorrowed {
     fn position(&self) -> Position {
         self.position
     }

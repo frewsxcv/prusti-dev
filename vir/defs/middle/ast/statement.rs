@@ -14,13 +14,15 @@ use crate::common::display;
 pub enum Statement {
     Comment(Comment),
     OldLabel(OldLabel),
-    Inhale(Inhale),
-    Exhale(Exhale),
+    InhalePredicate(InhalePredicate),
+    ExhalePredicate(ExhalePredicate),
+    InhaleExpression(InhaleExpression),
+    ExhaleExpression(ExhaleExpression),
+    Assume(Assume),
+    Assert(Assert),
     Consume(Consume),
     Havoc(Havoc),
     GhostHavoc(GhostHavoc),
-    Assume(Assume),
-    Assert(Assert),
     FoldOwned(FoldOwned),
     UnfoldOwned(UnfoldOwned),
     FoldRef(FoldRef),
@@ -36,6 +38,9 @@ pub enum Statement {
     Assign(Assign),
     GhostAssign(GhostAssign),
     SetUnionVariant(SetUnionVariant),
+    // Pack(Pack),
+    // Unpack(Unpack),
+    RestoreRawBorrowed(RestoreRawBorrowed),
     NewLft(NewLft),
     EndLft(EndLft),
     DeadReference(DeadReference),
@@ -62,16 +67,18 @@ pub struct OldLabel {
     pub position: Position,
 }
 
-/// Inhale the permission denoted by the place.
-#[display(fmt = "inhale {}", predicate)]
-pub struct Inhale {
+/// Inhale the permission denoted by the place. This operation is automatically
+/// managed by fold-unfold.
+#[display(fmt = "inhale-pred {}", predicate)]
+pub struct InhalePredicate {
     pub predicate: Predicate,
     pub position: Position,
 }
 
-#[display(fmt = "exhale {}", predicate)]
-/// Exhale the permission denoted by the place.
-pub struct Exhale {
+#[display(fmt = "exhale-pred {}", predicate)]
+/// Exhale the permission denoted by the place. This operation is automatically
+/// managed by fold-unfold.
+pub struct ExhalePredicate {
     pub predicate: Predicate,
     pub position: Position,
 }
@@ -96,8 +103,22 @@ pub struct GhostHavoc {
     pub position: Position,
 }
 
+#[display(fmt = "inhale-expr {}", expression)]
+/// Inhale the boolean expression. This operation is ignored by fold-unfold.
+pub struct InhaleExpression {
+    pub expression: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "exhale-expr {}", expression)]
+/// Exhale the boolean expression. This operation is ignored by fold-unfold.
+pub struct ExhaleExpression {
+    pub expression: Expression,
+    pub position: Position,
+}
+
 #[display(fmt = "assume {}", expression)]
-/// Assume the boolean expression.
+/// Assume the pure boolean expression.
 pub struct Assume {
     pub expression: Expression,
     pub position: Position,
@@ -108,7 +129,7 @@ pub struct Assume {
     "display::option!(condition, \"<{}>\", \"\")",
     expression
 )]
-/// Assert the boolean expression.
+/// Assert the pure boolean expression.
 pub struct Assert {
     pub expression: Expression,
     pub condition: Option<BlockMarkerCondition>,
@@ -301,6 +322,29 @@ pub struct GhostAssign {
 #[display(fmt = "set-union-variant {}", variant_place)]
 pub struct SetUnionVariant {
     pub variant_place: Expression,
+    pub position: Position,
+}
+
+// #[display(fmt = "pack {}", place)]
+// pub struct Pack {
+//     pub place: Expression,
+//     pub position: Position,
+// }
+
+// #[display(fmt = "unpack {}", place)]
+// pub struct Unpack {
+//     pub place: Expression,
+//     pub position: Position,
+// }
+
+#[display(
+    fmt = "restore-raw-borrowed {} --* {}",
+    borrowing_place,
+    restored_place
+)]
+pub struct RestoreRawBorrowed {
+    pub borrowing_place: Expression,
+    pub restored_place: Expression,
     pub position: Position,
 }
 

@@ -1,4 +1,3 @@
-use super::predicate_use::UniqueRefUseBuilder;
 use crate::encoder::{
     errors::SpannedEncodingResult,
     middle::core_proof::{
@@ -7,8 +6,11 @@ use crate::encoder::{
         lifetimes::LifetimesInterface,
         lowerer::Lowerer,
         places::PlacesInterface,
-        predicates::owned::builders::{
-            common::predicate_decl::PredicateDeclBuilder, PredicateDeclBuilderMethods,
+        predicates::{
+            owned::builders::{
+                common::predicate_decl::PredicateDeclBuilder, PredicateDeclBuilderMethods,
+            },
+            PredicatesOwnedInterface,
         },
         snapshots::{
             IntoPureSnapshot, IntoSnapshot, SnapshotValidityInterface, SnapshotValuesInterface,
@@ -16,6 +18,7 @@ use crate::encoder::{
         type_layouts::TypeLayoutsInterface,
     },
 };
+use prusti_common::config;
 use vir_crate::{
     common::expression::{GuardedExpressionIterator, QuantifierHelpers},
     low::{self as vir_low},
@@ -84,9 +87,11 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
     pub(in super::super::super) fn create_parameters(&mut self) -> SpannedEncodingResult<()> {
         self.inner.parameters.push(self.place.clone());
         self.inner.parameters.push(self.root_address.clone());
-        self.inner.parameters.push(self.current_snapshot.clone());
-        self.inner.parameters.push(self.final_snapshot.clone());
         self.inner.parameters.push(self.reference_lifetime.clone());
+        if config::use_snapshot_parameters_in_predicates() {
+            self.inner.parameters.push(self.current_snapshot.clone());
+            self.inner.parameters.push(self.final_snapshot.clone());
+        }
         self.inner.create_lifetime_parameters()?;
         if let Some(slice_len_mid) = &self.slice_len {
             let slice_len = slice_len_mid.to_pure_snapshot(self.inner.lowerer)?;
@@ -122,8 +127,7 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             self.final_snapshot.clone().into(),
             self.inner.position,
         )?;
-        let mut builder = UniqueRefUseBuilder::new(
-            self.inner.lowerer,
+        let expression = self.inner.lowerer.unique_ref_predicate(
             CallContext::BuiltinMethod,
             &field.ty,
             &field.ty,
@@ -132,10 +136,8 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             current_field_snapshot,
             final_field_snapshot,
             self.reference_lifetime.clone().into(),
+            None, // FIXME: This should be a proper value
         )?;
-        builder.add_lifetime_arguments()?;
-        builder.add_const_arguments()?;
-        let expression = builder.build();
         self.inner.add_conjunct(expression)
     }
 
@@ -170,8 +172,19 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             final_discriminant_call,
             self.inner.position,
         )?;
-        let builder = UniqueRefUseBuilder::new(
-            self.inner.lowerer,
+        // let builder = UniqueRefUseBuilder::new(
+        //     self.inner.lowerer,
+        //     CallContext::BuiltinMethod,
+        //     &decl.discriminant_type,
+        //     &decl.discriminant_type,
+        //     discriminant_place,
+        //     self.root_address.clone().into(),
+        //     current_discriminant_snapshot,
+        //     final_discriminant_snapshot,
+        //     self.reference_lifetime.clone().into(),
+        // )?;
+        // let expression = builder.build();
+        let expression = self.inner.lowerer.unique_ref_predicate(
             CallContext::BuiltinMethod,
             &decl.discriminant_type,
             &decl.discriminant_type,
@@ -180,9 +193,21 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             current_discriminant_snapshot,
             final_discriminant_snapshot,
             self.reference_lifetime.clone().into(),
+            None, // FIXME: This should be a proper value
         )?;
-        let expression = builder.build();
         self.inner.add_conjunct(expression)
+    }
+
+    pub(in super::super::super) fn add_unique_ref_pointer_predicate(
+        &mut self,
+        lifetime: &vir_mid::ty::LifetimeConst,
+    ) -> SpannedEncodingResult<vir_mid::Type> {
+        self.inner.add_unique_ref_pointer_predicate(
+            lifetime,
+            &self.place,
+            &self.root_address,
+            &self.current_snapshot,
+        )
     }
 
     pub(in super::super::super) fn add_unique_ref_target_predicate(
@@ -194,7 +219,9 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             target_type,
             lifetime,
             &self.place,
+            &self.root_address,
             &self.current_snapshot,
+            true,
         )
     }
 
@@ -265,8 +292,21 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             index_int.clone(),
             self.inner.position,
         )?;
-        let mut builder = UniqueRefUseBuilder::new(
-            self.inner.lowerer,
+        // let mut builder = UniqueRefUseBuilder::new(
+        //     self.inner.lowerer,
+        //     CallContext::BuiltinMethod,
+        //     element_type,
+        //     element_type,
+        //     element_place,
+        //     self.root_address.clone().into(),
+        //     current_element_snapshot,
+        //     final_element_snapshot,
+        //     self.reference_lifetime.clone().into(),
+        // )?;
+        // builder.add_lifetime_arguments()?;
+        // builder.add_const_arguments()?;
+        // let element_predicate_acc = builder.build();
+        let element_predicate_acc = self.inner.lowerer.unique_ref_predicate(
             CallContext::BuiltinMethod,
             element_type,
             element_type,
@@ -275,10 +315,8 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             current_element_snapshot,
             final_element_snapshot,
             self.reference_lifetime.clone().into(),
+            None, // FIXME: This should be a proper value
         )?;
-        builder.add_lifetime_arguments()?;
-        builder.add_const_arguments()?;
-        let element_predicate_acc = builder.build();
         let elements = vir_low::Expression::forall(
             vec![index],
             vec![vir_low::Trigger::new(vec![element_predicate_acc.clone()])],
@@ -324,8 +362,21 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             self.final_snapshot.clone().into(),
             self.inner.position,
         )?;
-        let mut builder = UniqueRefUseBuilder::new(
-            self.inner.lowerer,
+        // let mut builder = UniqueRefUseBuilder::new(
+        //     self.inner.lowerer,
+        //     CallContext::BuiltinMethod,
+        //     variant_type,
+        //     variant_type,
+        //     variant_place,
+        //     self.root_address.clone().into(),
+        //     current_variant_snapshot,
+        //     final_variant_snapshot,
+        //     self.reference_lifetime.clone().into(),
+        // )?;
+        // builder.add_lifetime_arguments()?;
+        // builder.add_const_arguments()?;
+        // let predicate = builder.build();
+        let predicate = self.inner.lowerer.unique_ref(
             CallContext::BuiltinMethod,
             variant_type,
             variant_type,
@@ -334,10 +385,8 @@ impl<'l, 'p, 'v, 'tcx> UniqueRefBuilder<'l, 'p, 'v, 'tcx> {
             current_variant_snapshot,
             final_variant_snapshot,
             self.reference_lifetime.clone().into(),
+            None, // FIXME: This should be a proper value
         )?;
-        builder.add_lifetime_arguments()?;
-        builder.add_const_arguments()?;
-        let predicate = builder.build();
         Ok((guard, predicate))
     }
 

@@ -1,5 +1,6 @@
 //! Encoder of pure functions.
 
+mod cleaner;
 mod encoder;
 mod interface;
 mod interpreter;

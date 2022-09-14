@@ -1,7 +1,7 @@
 use super::{
     builders::{
         ChangeUniqueRefPlaceMethodBuilder, DuplicateFracRefMethodBuilder,
-        MemoryBlockCopyMethodBuilder,
+        MemoryBlockCopyMethodBuilder, RestoreRawBorrowedMethodBuilder,
     },
     BuiltinMethodCallsInterface, CallContext,
 };
@@ -18,20 +18,24 @@ use crate::encoder::{
         },
         compute_address::ComputeAddressInterface,
         errors::ErrorsInterface,
+        footprint::FootprintInterface,
         lifetimes::LifetimesInterface,
         lowerer::{
             DomainsLowererInterface, Lowerer, MethodsLowererInterface, PredicatesLowererInterface,
             VariablesLowererInterface,
         },
         places::PlacesInterface,
+        pointers::PointersInterface,
         predicates::{
             OwnedNonAliasedUseBuilder, PredicatesMemoryBlockInterface, PredicatesOwnedInterface,
+            RestorationInterface,
         },
         references::ReferencesInterface,
         snapshots::{
             BuiltinFunctionsInterface, IntoBuiltinMethodSnapshot, IntoProcedureFinalSnapshot,
-            IntoProcedureSnapshot, IntoPureSnapshot, IntoSnapshot, SnapshotBytesInterface,
-            SnapshotValidityInterface, SnapshotValuesInterface, SnapshotVariablesInterface,
+            IntoProcedureSnapshot, IntoPureSnapshot, IntoSnapshot, IntoSnapshotLowerer,
+            SnapshotBytesInterface, SnapshotValidityInterface, SnapshotValuesInterface,
+            SnapshotVariablesInterface,
         },
         type_layouts::TypeLayoutsInterface,
     },
@@ -40,7 +44,7 @@ use itertools::Itertools;
 use rustc_hash::FxHashSet;
 use vir_crate::{
     common::{
-        expression::{ExpressionIterator, UnaryOperationHelpers},
+        expression::{ExpressionIterator, BinaryOperationHelpers, UnaryOperationHelpers},
         identifier::WithIdentifier,
     },
     low::{self as vir_low, macros::method_name},
@@ -49,6 +53,10 @@ use vir_crate::{
         operations::{const_generics::WithConstArguments, lifetimes::WithLifetimes, ty::Typed},
     },
 };
+
+// FIXME: Move this to some proper place. It is shared with the snap function
+// encoder.
+pub(in super::super) use super::assertion_encoder::AssertionEncoder;
 
 #[derive(Default)]
 pub(in super::super) struct BuiltinMethodsState {
@@ -73,6 +81,7 @@ pub(in super::super) struct BuiltinMethodsState {
     encoded_lft_tok_sep_take_methods: FxHashSet<usize>,
     encoded_lft_tok_sep_return_methods: FxHashSet<usize>,
     encoded_open_close_mut_ref_methods: FxHashSet<String>,
+    encoded_restore_raw_borrowed_methods: FxHashSet<String>,
     encoded_bor_shorten_methods: FxHashSet<String>,
 }
 
@@ -279,6 +288,9 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 };
                 arguments.push(len);
             }
+            vir_mid::Rvalue::Cast(value) => {
+                self.encode_operand_arguments(arguments, &value.operand, true)?;
+            }
             vir_mid::Rvalue::UnaryOp(value) => {
                 self.encode_operand_arguments(arguments, &value.argument, true)?;
             }
@@ -311,6 +323,10 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 );
                 for operand in &aggr_value.operands {
                     self.encode_operand_arguments(arguments, operand, false)?;
+                }
+                if self.use_heap_variable()? && aggr_value.ty.is_struct() {
+                    let heap = self.heap_variable_version_at_label(&None)?;
+                    arguments.push(heap.into());
                 }
             }
         }
@@ -515,6 +531,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         &target_place,
                         &target_address,
                         &result_value,
+                        false,
                     )?;
                     posts.push(predicate);
                     self.encode_assign_method_rvalue(
@@ -627,19 +644,36 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                     operand_address: Address,
                     operand_value: { ty.to_snapshot(self)? }
                 };
-                let predicate = self.owned_non_aliased_full_vars(
+                let non_aliased_predicate = self.owned_non_aliased_full_vars(
                     CallContext::BuiltinMethod,
                     ty,
                     ty,
                     &operand_place,
                     &operand_address,
                     &operand_value,
+                    false,
                 )?;
                 let compute_address = ty!(Address);
                 let address =
                     expr! { ComputeAddress::compute_address(operand_place, operand_address) };
-                pres.push(predicate.clone());
-                posts.push(predicate);
+                pres.push(non_aliased_predicate);
+                let aliased_root_place = self.encode_aliased_place_root(position)?;
+                let aliased_predicate = self.owned_aliased(
+                    CallContext::BuiltinMethod,
+                    ty,
+                    ty,
+                    aliased_root_place,
+                    address.clone(),
+                    operand_value.clone().into(),
+                    None,
+                )?;
+                let restore_raw_borrowed = self.restore_raw_borrowed(
+                    ty,
+                    operand_place.clone().into(),
+                    operand_address.clone().into(),
+                )?;
+                posts.push(aliased_predicate);
+                posts.push(restore_raw_borrowed);
                 parameters.push(operand_place);
                 parameters.push(operand_address);
                 parameters.push(operand_value);
@@ -649,6 +683,26 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 var_decls! { length: {self.size_type()?} };
                 parameters.push(length.clone());
                 length.into()
+            }
+            vir_mid::Rvalue::Cast(value) => {
+                let source_type = value.operand.expression.get_type();
+                match (&value.ty, source_type) {
+                    (vir_mid::Type::Pointer(_), vir_mid::Type::Pointer(_)) => {
+                        let operand_value = self.encode_assign_operand(
+                            parameters,
+                            pres,
+                            posts,
+                            1,
+                            &value.operand,
+                            position,
+                            true,
+                        )?;
+                        let address =
+                            self.pointer_address(source_type, operand_value.into(), position)?;
+                        self.construct_constant_snapshot(result_type, address, position)?
+                    }
+                    (t, s) => unimplemented!("({t}) {s}"),
+                }
             }
             vir_mid::Rvalue::UnaryOp(value) => {
                 let operand_value = self.encode_assign_operand(
@@ -775,7 +829,130 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         self.construct_enum_snapshot(&value.ty, variant_constructor, position)?
                     }
                     vir_mid::Type::Struct(_) => {
-                        self.construct_struct_snapshot(&value.ty, arguments, position)?
+                        // FIXME: Code duplication with encode_owned_non_aliased_snapshot.
+                        let heap = if self.use_heap_variable()? {
+                            let heap_name = self.heap_variable_name()?;
+                            Some(vir_low::VariableDecl::new(heap_name, self.heap_type()?))
+                        } else {
+                            None
+                        };
+                        // FIXME: Do not hardcode variables here.
+                        // Instead pass in the original ones.
+                        var_decls!(target_place: Place, target_address: Address);
+                        let decl = self.encoder.get_type_decl_mid(&value.ty)?.unwrap_struct();
+                        if let Some(invariant) = &decl.structural_invariant {
+                            let mut assertion_encoder =
+                                AssertionEncoder::new(&decl, arguments.clone(), &heap);
+                            if self.use_heap_variable()? {
+                                // TODO: Add a postcondition that is the
+                                // structural invariant that equates snap
+                                // calls from the input predicates to
+                                // projections on `result_value`.
+                                let deref_fields = self.structural_invariant_to_deref_fields(
+                                    invariant.clone(),
+                                    &value.ty,
+                                    &decl,
+                                )?;
+                                for deref in deref_fields {
+                                    let base_snapshot = assertion_encoder.expression_to_snapshot(
+                                        self,
+                                        &deref.base,
+                                        true,
+                                    )?;
+                                    let argument = if let Some(heap) = heap.as_ref() {
+                                        let in_heap =
+                                            assertion_encoder.address_in_heap(self, &deref.base)?;
+                                        // let in_heap = self.address_in_heap(heap.clone(), &deref.base)?;
+                                        pres.push(in_heap);
+                                        self.pointer_target_snapshot_in_heap(
+                                            deref.base.get_type(),
+                                            heap.clone(),
+                                            base_snapshot,
+                                            position,
+                                        )?
+                                    } else {
+                                        // let deref_value = assertion_encoder
+                                        //     .expression_to_snapshot(self, &deref.base, true)?;
+                                        let address = self.pointer_address(
+                                            deref.base.get_type(),
+                                            base_snapshot,
+                                            position,
+                                        )?;
+                                        let ty = &deref.ty;
+                                        self.owned_aliased_snap(
+                                            CallContext::BuiltinMethod,
+                                            ty,
+                                            ty,
+                                            address,
+                                            position,
+                                        )?
+                                    };
+                                    arguments.push(argument);
+                                    // if self.use_heap_variable()? {
+                                    //     let in_heap =
+                                    //         assertion_encoder.address_in_heap(self, &deref.base)?;
+                                    //     // let in_heap = self.address_in_heap(heap.clone(), &deref.base)?;
+                                    //     pres.push(in_heap);
+                                    // }
+                                }
+                            } else {
+                                assert_eq!(arguments.len(), decl.fields.len());
+                                for (argument, field) in arguments.iter().zip(decl.fields.iter()) {
+                                    let field_snapshot = self.obtain_struct_field_snapshot(
+                                        result_type,
+                                        field,
+                                        result_value.clone().into(),
+                                        position,
+                                    )?;
+                                    posts.push(vir_low::Expression::equals(
+                                        argument.clone(),
+                                        field_snapshot,
+                                    ))
+                                }
+                                let predicate = self
+                                    .owned_non_aliased_predicate(
+                                        CallContext::BuiltinMethod,
+                                        result_type,
+                                        result_type,
+                                        target_place.clone().into(),
+                                        target_address.clone().into(),
+                                        true.into(),
+                                        None,
+                                    )?
+                                    .unwrap_predicate_access_predicate();
+                                assertion_encoder.set_result_value(result_value.clone());
+                                for assertion in invariant {
+                                    let low_assertion = assertion_encoder
+                                        .expression_to_snapshot(self, assertion, true)?;
+                                    posts.push(vir_low::Expression::unfolding(
+                                        predicate.clone(),
+                                        low_assertion,
+                                        position,
+                                    ));
+                                }
+                                assertion_encoder.unset_result_value();
+                            }
+                            for assertion in invariant {
+                                let low_assertion = assertion_encoder
+                                    .expression_to_snapshot(self, assertion, true)?;
+                                pres.push(low_assertion);
+                            }
+                        }
+                        if self.use_heap_variable()? {
+                            parameters.push(heap.clone().unwrap());
+                            // TODO: add the invariant to the precondition with
+                            // deref fields being the parameters of this method
+                            self.construct_struct_snapshot(&value.ty, arguments, position)?
+                        } else {
+                            self.owned_non_aliased_snap(
+                                CallContext::BuiltinMethod,
+                                &value.ty,
+                                &value.ty,
+                                target_place.into(),
+                                target_address.into(),
+                                position,
+                            )?
+                        }
                     }
                     vir_mid::Type::Array(value_ty) => vir_low::Expression::container_op(
                         vir_low::ContainerOpKind::SeqConstructor,
@@ -854,9 +1031,15 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
         posts.push(
             expr! { acc(MemoryBlock([operation_result_address.clone()], [size_of_result.clone()])) },
         );
-        posts.push(
-            expr! { acc(OwnedNonAliased<flag_type>([flag_place], target_address, [flag_value.clone()])) },
-        );
+        posts.push(self.owned_non_aliased(
+            CallContext::BuiltinMethod,
+            flag_type,
+            flag_type,
+            flag_place,
+            target_address.into(),
+            flag_value.clone(),
+            None,
+        )?);
         let operand_left =
             self.encode_assign_operand(parameters, pres, posts, 1, &value.left, position, true)?;
         let operand_right =
@@ -930,6 +1113,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 &operand_snapshot_current,
                 &operand_snapshot_final,
                 &deref_lifetime,
+                None,
             )?
         } else {
             self.frac_ref_full_vars(
@@ -953,13 +1137,13 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 ty,
                 target_place.into(),
                 target_address.into(),
-                result_value.clone().into(),
             )?;
+            builder.add_snapshot_argument(result_value.clone().into())?;
             builder.add_custom_argument(true.into())?;
             builder.add_custom_argument(new_borrow_lifetime.clone().into())?;
             builder.add_lifetime_arguments()?;
             builder.add_const_arguments()?;
-            builder.build()
+            builder.build()?
         };
         let restoration = {
             let final_snapshot = self.reference_target_final_snapshot(
@@ -1080,6 +1264,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
             &operand_place,
             &operand_root_address,
             &operand_snapshot,
+            false,
         )?;
         let reference_predicate = {
             self.mark_owned_non_aliased_as_unfolded(result_type)?;
@@ -1090,13 +1275,13 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 ty,
                 target_place.into(),
                 target_address.into(),
-                result_value.clone().into(),
             )?;
+            builder.add_snapshot_argument(result_value.clone().into())?;
             builder.add_custom_argument(true.into())?;
             builder.add_custom_argument(new_borrow_lifetime.clone().into())?;
             builder.add_lifetime_arguments()?;
             builder.add_const_arguments()?;
-            builder.build()
+            builder.build()?
         };
         let restoration = {
             let restoration_snapshot = if value.uniqueness.is_unique() {
@@ -1209,6 +1394,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                     &place,
                     &root_address,
                     &snapshot,
+                    false,
                 )?;
                 pres.push(predicate.clone());
                 let post_predicate = if operand.kind == vir_mid::OperandKind::Copy {
@@ -1324,6 +1510,10 @@ pub(in super::super) trait BuiltinMethodsInterface {
         statements: &mut Vec<vir_low::Statement>,
         predicate: vir_mid::VariableDecl,
         position: vir_low::Position,
+    ) -> SpannedEncodingResult<()>;
+    fn encode_restore_raw_borrowed_method(
+        &mut self,
+        ty: &vir_mid::Type,
     ) -> SpannedEncodingResult<()>;
     fn encode_open_frac_bor_atomic_method(
         &mut self,
@@ -1451,9 +1641,9 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             );
             let target_memory_block = builder.create_target_memory_block()?;
             builder.add_precondition(target_memory_block);
-            let source_owned = builder.create_source_owned()?;
+            let source_owned = builder.create_source_owned(false)?;
             builder.add_precondition(source_owned);
-            let target_owned = builder.create_target_owned()?;
+            let target_owned = builder.create_target_owned(false)?;
             builder.add_postcondition(target_owned);
             let source_memory_block = builder.create_source_memory_block()?;
             builder.add_postcondition(source_memory_block);
@@ -1461,7 +1651,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             builder.add_target_validity_postcondition()?;
             if has_body {
                 builder.create_body();
-                let source_owned = builder.create_source_owned()?;
+                let source_owned = builder.create_source_owned(true)?;
                 builder.add_statement(vir_low::Statement::unfold_no_pos(source_owned));
             }
             match &type_decl {
@@ -1511,8 +1701,20 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 _ => unimplemented!("{type_decl:?}"),
             }
             if has_body {
-                let target_owned = builder.create_target_owned()?;
+                let target_owned = builder.create_target_owned(true)?;
                 builder.add_statement(vir_low::Statement::fold_no_pos(target_owned));
+                if let vir_mid::TypeDecl::Reference(vir_mid::type_decl::Reference {
+                    uniqueness,
+                    lifetimes,
+                    ..
+                }) = &type_decl
+                {
+                    if uniqueness.is_unique() {
+                        // FIXME: Have a getter for the first lifetime.
+                        let lifetime = &lifetimes[0];
+                        builder.add_dead_lifetime_hack(lifetime)?;
+                    }
+                }
             }
             let method = builder.build();
             self.declare_method(method)?;
@@ -1607,7 +1809,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 "copy_place",
                 &normalized_type,
                 &type_decl,
-                BuiltinMethodKind::MovePlace,
+                BuiltinMethodKind::CopyPlace,
             )?;
             builder.create_parameters()?;
             // FIXME: To generate body for arrays, we would need to generate a
@@ -1624,12 +1826,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             let source_owned = builder.create_source_owned()?;
             builder.add_precondition(source_owned.clone());
             builder.add_postcondition(source_owned);
-            let target_owned = builder.create_target_owned()?;
+            let target_owned = builder.create_target_owned(false)?;
             builder.add_postcondition(target_owned);
             builder.add_target_validity_postcondition()?;
             if has_body {
                 builder.create_body();
-                let source_owned = builder.create_source_owned()?;
+                let source_owned = builder.create_source_owned_predicate()?;
                 builder.add_statement(vir_low::Statement::unfold_no_pos(source_owned));
             }
             match &type_decl {
@@ -1650,9 +1852,9 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 _ => unimplemented!("{type_decl:?}"),
             }
             if has_body {
-                let target_owned = builder.create_target_owned()?;
+                let target_owned = builder.create_target_owned(true)?;
                 builder.add_statement(vir_low::Statement::fold_no_pos(target_owned));
-                let source_owned = builder.create_source_owned()?;
+                let source_owned = builder.create_source_owned_predicate()?;
                 builder.add_statement(vir_low::Statement::fold_no_pos(source_owned));
             }
             let method = builder.build();
@@ -1698,7 +1900,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             let target_memory_block = builder.create_target_memory_block()?;
             builder.add_precondition(target_memory_block);
             builder.add_source_validity_precondition()?;
-            let target_owned = builder.create_target_owned()?;
+            let target_owned = builder.create_target_owned(false)?;
             builder.add_postcondition(target_owned);
             if has_body {
                 builder.create_body();
@@ -1729,7 +1931,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 _ => unimplemented!("{type_decl:?}"),
             }
             if has_body {
-                let target_owned = builder.create_target_owned()?;
+                let target_owned = builder.create_target_owned(true)?;
                 builder.add_statement(vir_low::Statement::fold_no_pos(target_owned));
             }
             let method = builder.build();
@@ -1770,6 +1972,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 &place,
                 &root_address,
                 &old_snapshot,
+                false,
             )?;
             let predicate_out = self.owned_non_aliased_full_vars(
                 CallContext::BuiltinMethod,
@@ -1778,6 +1981,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 &place,
                 &root_address,
                 &fresh_snapshot,
+                false,
             )?;
             let method = vir_low::MethodDecl::new(
                 method_name,
@@ -1809,6 +2013,8 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             self.builtin_methods_state
                 .encoded_memory_block_split_methods
                 .insert(ty_identifier);
+
+            self.encode_compute_address(ty)?;
 
             let type_decl = self.encoder.get_type_decl_mid(ty)?;
             let normalized_type = ty.normalize_type();
@@ -1866,6 +2072,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 .encoded_memory_block_join_methods
                 .insert(ty_identifier);
 
+            self.encode_compute_address(ty)?;
             let type_decl = self.encoder.get_type_decl_mid(ty)?;
             let normalized_type = ty.normalize_type();
             let mut builder = MemoryBlockJoinMethodBuilder::new(
@@ -1996,7 +2203,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             )?;
             builder.create_parameters()?;
             builder.add_const_parameters_validity_precondition()?;
-            let predicate = builder.create_owned()?;
+            let predicate = builder.create_owned(false)?;
             builder.add_precondition(predicate);
             let memory_block = builder.create_target_memory_block()?;
             builder.add_postcondition(memory_block);
@@ -2011,7 +2218,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
             );
             if has_body {
                 builder.create_body();
-                let predicate = builder.create_owned()?;
+                let predicate = builder.create_owned(true)?;
                 builder.add_statement(vir_low::Statement::unfold_no_pos(predicate));
             }
             match &type_decl {
@@ -2147,21 +2354,66 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 result_value.clone().into(),
                 position,
             )?;
-            if let vir_mid::Rvalue::Ref(value) = value {
-                let snapshot = if value.uniqueness.is_unique() {
-                    self.reference_target_final_snapshot(
+            // if let vir_mid::Rvalue::Ref(value) = value {
+            //     let snapshot = if value.uniqueness.is_unique() {
+            //         self.reference_target_final_snapshot(
+            //             target.get_type(),
+            //             result_value.into(),
+            //             position,
+            //         )?
+            //     } else {
+            //         self.reference_target_current_snapshot(
+            //             target.get_type(),
+            //             result_value.into(),
+            //             position,
+            //         )?
+            //     };
+            //     self.encode_snapshot_update(statements, &value.place, snapshot, position)?;
+            // }
+            match value {
+                vir_mid::Rvalue::Ref(value) => {
+                    let snapshot = if value.uniqueness.is_unique() {
+                        self.reference_target_final_snapshot(
+                            target.get_type(),
+                            result_value.into(),
+                            position,
+                        )?
+                    } else {
+                        self.reference_target_current_snapshot(
+                            target.get_type(),
+                            result_value.into(),
+                            position,
+                        )?
+                    };
+                    self.encode_snapshot_update(statements, &value.place, snapshot, position)?;
+                }
+                vir_mid::Rvalue::AddressOf(value) => {
+                    let address =
+                        self.pointer_address(target.get_type(), result_value.clone().into(), position)?;
+                    let heap = self.heap_variable_version_at_label(&None)?;
+                    statements.push(vir_low::Statement::assume(
+                        vir_low::Expression::container_op_no_pos(
+                            vir_low::ContainerOpKind::MapContains,
+                            heap.ty.clone(),
+                            vec![heap.into(), address],
+                        ),
+                        position,
+                    ));
+                    let heap_chunk = self.pointer_target_snapshot(
                         target.get_type(),
+                        &None,
                         result_value.into(),
                         position,
-                    )?
-                } else {
-                    self.reference_target_current_snapshot(
-                        target.get_type(),
-                        result_value.into(),
+                    )?;
+                    statements.push(vir_low::Statement::assume(
+                        vir_low::Expression::equals(
+                            heap_chunk,
+                            value.place.to_procedure_snapshot(self)?,
+                        ),
                         position,
-                    )?
-                };
-                self.encode_snapshot_update(statements, &value.place, snapshot, position)?;
+                    ));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -2318,6 +2570,43 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 ],
                 None,
             );
+            self.declare_method(method)?;
+        }
+        Ok(())
+    }
+
+    fn encode_restore_raw_borrowed_method(
+        &mut self,
+        ty: &vir_mid::Type,
+    ) -> SpannedEncodingResult<()> {
+        let ty_identifier = ty.get_identifier();
+        if !self
+            .builtin_methods_state
+            .encoded_restore_raw_borrowed_methods
+            .contains(&ty_identifier)
+        {
+            self.builtin_methods_state
+                .encoded_restore_raw_borrowed_methods
+                .insert(ty_identifier);
+
+            self.encode_restore_raw_borrowed_transition_predicate(ty)?;
+
+            let type_decl = self.encoder.get_type_decl_mid(ty)?;
+            let normalized_type = ty.normalize_type();
+
+            let mut builder = RestoreRawBorrowedMethodBuilder::new(
+                self,
+                vir_low::MethodKind::LowMemoryOperation,
+                "restore_raw_borrowed",
+                &normalized_type,
+                &type_decl,
+                BuiltinMethodKind::RestoreRawBorrowed,
+            )?;
+            builder.create_parameters()?;
+            builder.add_aliased_source_precondition()?;
+            builder.add_shift_precondition()?;
+            builder.add_non_aliased_target_postcondition()?;
+            let method = builder.build();
             self.declare_method(method)?;
         }
         Ok(())
@@ -2566,6 +2855,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 &place,
                 &root_address,
                 &current_snapshot,
+                false,
             )?;
             let unique_ref_predicate = self.unique_ref_full_vars(
                 CallContext::BuiltinMethod,
@@ -2576,6 +2866,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 &current_snapshot,
                 &final_snapshot,
                 &lifetime,
+                None,
             )?;
             let open_method = vir_low::MethodDecl::new(
                 method_name! { open_mut_ref<ty> },
@@ -2726,6 +3017,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                     &current_snapshot,
                     &final_snapshot,
                     &old_lft,
+                    None,
                 )?);
                 posts.push(self.unique_ref_full_vars(
                     CallContext::BuiltinMethod,
@@ -2736,6 +3028,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                     &current_snapshot,
                     &final_snapshot,
                     &lft,
+                    None,
                 )?);
             } else {
                 pres.push(self.frac_ref_full_vars(

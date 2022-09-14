@@ -1,10 +1,16 @@
 use super::{
-    encoder::PredicateEncoder, FracRefUseBuilder, OwnedNonAliasedUseBuilder, UniqueRefUseBuilder,
+    builders::{OwnedNonAliasedSnapCallBuilder, UniqueRefSnapCallBuilder},
+    encoder::PredicateEncoder,
+    FracRefUseBuilder, OwnedNonAliasedUseBuilder, UniqueRefUseBuilder,
 };
 use crate::encoder::{
     errors::SpannedEncodingResult,
-    middle::core_proof::{builtin_methods::CallContext, lowerer::Lowerer, types::TypesInterface},
+    middle::core_proof::{
+        builtin_methods::CallContext, lowerer::Lowerer, places::PlacesInterface,
+        types::TypesInterface,
+    },
 };
+use prusti_common::config;
 use rustc_hash::FxHashSet;
 use vir_crate::{
     low::{self as vir_low},
@@ -18,6 +24,7 @@ use vir_crate::{
 pub(in super::super) struct PredicatesOwnedState {
     unfolded_owned_non_aliased_predicates: FxHashSet<vir_mid::Type>,
     used_unique_ref_predicates: FxHashSet<vir_mid::Type>,
+    snap_wrappers: FxHashSet<String>,
 }
 
 pub(in super::super::super) trait PredicatesOwnedInterface {
@@ -33,6 +40,7 @@ pub(in super::super::super) trait PredicatesOwnedInterface {
         &mut self,
     ) -> SpannedEncodingResult<Vec<vir_low::PredicateDecl>>;
     /// A version of `owned_non_aliased` for the most common case.
+    #[allow(clippy::too_many_arguments)]
     fn owned_non_aliased_full_vars<G>(
         &mut self,
         context: CallContext,
@@ -41,11 +49,68 @@ pub(in super::super::super) trait PredicatesOwnedInterface {
         place: &vir_low::VariableDecl,
         root_address: &vir_low::VariableDecl,
         snapshot: &vir_low::VariableDecl,
+        must_be_predicate: bool,
     ) -> SpannedEncodingResult<vir_low::Expression>
     where
         G: WithLifetimes + WithConstArguments;
     #[allow(clippy::too_many_arguments)]
     fn owned_non_aliased<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        snapshot: vir_low::Expression,
+        permission_amount: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments;
+    /// The result is guaranteed to be a `acc(predicate)`, which is needed
+    /// for fold/unfold operations.
+    #[allow(clippy::too_many_arguments)]
+    fn owned_non_aliased_predicate<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        snapshot: vir_low::Expression,
+        permission_amount: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments;
+    #[allow(clippy::too_many_arguments)]
+    fn owned_non_aliased_snap<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        position: vir_low::Position,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments;
+    #[allow(clippy::too_many_arguments)]
+    fn owned_aliased_snap<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        root_address: vir_low::Expression,
+        position: vir_low::Position,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments;
+    // fn wrap_snap_into_bool(
+    //     &mut self,
+    //     ty: &vir_mid::Type,
+    //     expression: vir_low::Expression,
+    // ) -> SpannedEncodingResult<vir_low::Expression>;
+    #[allow(clippy::too_many_arguments)]
+    fn owned_aliased<G>(
         &mut self,
         context: CallContext,
         ty: &vir_mid::Type,
@@ -68,6 +133,7 @@ pub(in super::super::super) trait PredicatesOwnedInterface {
         current_snapshot: &vir_low::VariableDecl,
         final_snapshot: &vir_low::VariableDecl,
         lifetime: &vir_low::VariableDecl,
+        target_slice_len: Option<vir_low::Expression>,
     ) -> SpannedEncodingResult<vir_low::Expression>
     where
         G: WithLifetimes + WithConstArguments;
@@ -82,6 +148,36 @@ pub(in super::super::super) trait PredicatesOwnedInterface {
         current_snapshot: vir_low::Expression,
         final_snapshot: vir_low::Expression,
         lifetime: vir_low::Expression,
+        target_slice_len: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments;
+    #[allow(clippy::too_many_arguments)]
+    fn unique_ref_predicate<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        current_snapshot: vir_low::Expression,
+        final_snapshot: vir_low::Expression,
+        lifetime: vir_low::Expression,
+        target_slice_len: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments;
+    #[allow(clippy::too_many_arguments)]
+    fn unique_ref_snap<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        lifetime: vir_low::Expression,
+        target_slice_len: Option<vir_low::Expression>,
+        is_final: bool,
     ) -> SpannedEncodingResult<vir_low::Expression>
     where
         G: WithLifetimes + WithConstArguments;
@@ -181,19 +277,32 @@ impl<'p, 'v: 'p, 'tcx: 'v> PredicatesOwnedInterface for Lowerer<'p, 'v, 'tcx> {
         place: &vir_low::VariableDecl,
         root_address: &vir_low::VariableDecl,
         snapshot: &vir_low::VariableDecl,
+        must_be_predicate: bool,
     ) -> SpannedEncodingResult<vir_low::Expression>
     where
         G: WithLifetimes + WithConstArguments,
     {
-        self.owned_non_aliased(
-            context,
-            ty,
-            generics,
-            place.clone().into(),
-            root_address.clone().into(),
-            snapshot.clone().into(),
-            None,
-        )
+        if must_be_predicate {
+            self.owned_non_aliased_predicate(
+                context,
+                ty,
+                generics,
+                place.clone().into(),
+                root_address.clone().into(),
+                snapshot.clone().into(),
+                None,
+            )
+        } else {
+            self.owned_non_aliased(
+                context,
+                ty,
+                generics,
+                place.clone().into(),
+                root_address.clone().into(),
+                snapshot.clone().into(),
+                None,
+            )
+        }
     }
 
     fn owned_non_aliased<G>(
@@ -209,19 +318,168 @@ impl<'p, 'v: 'p, 'tcx: 'v> PredicatesOwnedInterface for Lowerer<'p, 'v, 'tcx> {
     where
         G: WithLifetimes + WithConstArguments,
     {
-        let mut builder = OwnedNonAliasedUseBuilder::new(
+        let mut builder =
+            OwnedNonAliasedUseBuilder::new(self, context, ty, generics, place, root_address)?;
+        builder.add_snapshot_argument(snapshot)?;
+        builder.add_lifetime_arguments()?;
+        builder.add_const_arguments()?;
+        builder.set_maybe_permission_amount(permission_amount)?;
+        builder.build()
+    }
+
+    fn owned_non_aliased_predicate<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        snapshot: vir_low::Expression,
+        permission_amount: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments,
+    {
+        let mut builder =
+            OwnedNonAliasedUseBuilder::new(self, context, ty, generics, place, root_address)?;
+        if config::use_snapshot_parameters_in_predicates() {
+            builder.add_snapshot_argument(snapshot)?;
+        }
+        builder.add_lifetime_arguments()?;
+        builder.add_const_arguments()?;
+        builder.set_maybe_permission_amount(permission_amount)?;
+        builder.build()
+    }
+
+    fn owned_non_aliased_snap<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        position: vir_low::Position,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments,
+    {
+        let mut builder = OwnedNonAliasedSnapCallBuilder::new(
             self,
             context,
             ty,
             generics,
             place,
             root_address,
-            snapshot,
+            position,
         )?;
         builder.add_lifetime_arguments()?;
         builder.add_const_arguments()?;
-        builder.set_maybe_permission_amount(permission_amount)?;
-        Ok(builder.build())
+        builder.build()
+    }
+
+    fn owned_aliased_snap<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        root_address: vir_low::Expression,
+        position: vir_low::Position,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments,
+    {
+        let place = self.encode_aliased_place_root(Default::default())?;
+        let mut builder = OwnedNonAliasedSnapCallBuilder::new(
+            self,
+            context,
+            ty,
+            generics,
+            place,
+            root_address,
+            position,
+        )?;
+        builder.add_lifetime_arguments()?;
+        builder.add_const_arguments()?;
+        builder.build()
+    }
+
+    // fn wrap_snap_into_bool(
+    //     &mut self,
+    //     ty: &vir_mid::Type,
+    //     expression: vir_low::Expression,
+    // ) -> SpannedEncodingResult<vir_low::Expression> {
+    //     let ty_identifier = ty.get_identifier();
+    //     let name = format!("snap_call_wrapper${}", ty_identifier);
+    //     let domain_name = "SnapCallWrappers";
+    //     let position = expression.position();
+    //     if !self
+    //         .predicates_encoding_state
+    //         .owned
+    //         .snap_wrappers
+    //         .contains(&ty_identifier)
+    //     {
+    //         use vir_low::macros::*;
+    //         var_decls!(
+    //             snapshot: { ty.to_snapshot(self)? }
+    //         );
+    //         let call = self.create_domain_func_app(
+    //             domain_name,
+    //             name.clone(),
+    //             vec![snapshot.clone().into()],
+    //             vir_low::Type::Bool,
+    //             position,
+    //         )?;
+    //         let body = vir_low::Expression::forall(
+    //             vec![snapshot],
+    //             vec![vir_low::Trigger::new(vec![call.clone()])],
+    //             call,
+    //         );
+    //         // let body = expr! {
+    //         //     forall( snapshot: { ty.to_snapshot(self)? } :: [ {[call.clone()]} ] [call] )
+    //         // };
+    //         let axiom = vir_low::DomainAxiomDecl {
+    //             name: format!("snap_call_wrapper_always_true${}", ty_identifier),
+    //             body,
+    //         };
+    //         self.declare_axiom(domain_name, axiom)?;
+    //         self.predicates_encoding_state
+    //             .owned
+    //             .snap_wrappers
+    //             .insert(ty_identifier);
+    //     }
+    //     self.create_domain_func_app(
+    //         domain_name,
+    //         name,
+    //         vec![expression],
+    //         vir_low::Type::Bool,
+    //         position,
+    //     )
+    // }
+
+    fn owned_aliased<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        snapshot: vir_low::Expression,
+        permission_amount: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments,
+    {
+        // Currently we try to treat both as synonyms.
+        self.mark_owned_non_aliased_as_unfolded(ty)?;
+        self.owned_non_aliased(
+            context,
+            ty,
+            generics,
+            place,
+            root_address,
+            snapshot,
+            permission_amount,
+        )
     }
 
     fn unique_ref_full_vars<G>(
@@ -234,6 +492,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> PredicatesOwnedInterface for Lowerer<'p, 'v, 'tcx> {
         current_snapshot: &vir_low::VariableDecl,
         final_snapshot: &vir_low::VariableDecl,
         lifetime: &vir_low::VariableDecl,
+        target_slice_len: Option<vir_low::Expression>,
     ) -> SpannedEncodingResult<vir_low::Expression>
     where
         G: WithLifetimes + WithConstArguments,
@@ -247,6 +506,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> PredicatesOwnedInterface for Lowerer<'p, 'v, 'tcx> {
             current_snapshot.clone().into(),
             final_snapshot.clone().into(),
             lifetime.clone().into(),
+            target_slice_len,
         )
     }
 
@@ -260,6 +520,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> PredicatesOwnedInterface for Lowerer<'p, 'v, 'tcx> {
         current_snapshot: vir_low::Expression,
         final_snapshot: vir_low::Expression,
         lifetime: vir_low::Expression,
+        target_slice_len: Option<vir_low::Expression>,
     ) -> SpannedEncodingResult<vir_low::Expression>
     where
         G: WithLifetimes + WithConstArguments,
@@ -271,13 +532,78 @@ impl<'p, 'v: 'p, 'tcx: 'v> PredicatesOwnedInterface for Lowerer<'p, 'v, 'tcx> {
             generics,
             place,
             root_address,
-            current_snapshot,
-            final_snapshot,
+            // current_snapshot,
+            // final_snapshot,
             lifetime,
+            target_slice_len,
+        )?;
+        builder.add_snapshot_arguments(current_snapshot, final_snapshot)?;
+        builder.add_lifetime_arguments()?;
+        builder.add_const_arguments()?;
+        builder.build()
+    }
+
+    fn unique_ref_predicate<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        current_snapshot: vir_low::Expression,
+        final_snapshot: vir_low::Expression,
+        lifetime: vir_low::Expression,
+        target_slice_len: Option<vir_low::Expression>,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments,
+    {
+        let mut builder = UniqueRefUseBuilder::new(
+            self,
+            context,
+            ty,
+            generics,
+            place,
+            root_address,
+            lifetime,
+            target_slice_len,
+        )?;
+        if config::use_snapshot_parameters_in_predicates() {
+            builder.add_snapshot_arguments(current_snapshot, final_snapshot)?;
+        }
+        builder.add_lifetime_arguments()?;
+        builder.add_const_arguments()?;
+        builder.build()
+    }
+
+    fn unique_ref_snap<G>(
+        &mut self,
+        context: CallContext,
+        ty: &vir_mid::Type,
+        generics: &G,
+        place: vir_low::Expression,
+        root_address: vir_low::Expression,
+        lifetime: vir_low::Expression,
+        target_slice_len: Option<vir_low::Expression>,
+        is_final: bool,
+    ) -> SpannedEncodingResult<vir_low::Expression>
+    where
+        G: WithLifetimes + WithConstArguments,
+    {
+        let mut builder = UniqueRefSnapCallBuilder::new(
+            self,
+            context,
+            ty,
+            generics,
+            place,
+            root_address,
+            lifetime,
+            target_slice_len,
+            is_final,
         )?;
         builder.add_lifetime_arguments()?;
         builder.add_const_arguments()?;
-        Ok(builder.build())
+        builder.build()
     }
 
     fn frac_ref_full_vars<G>(

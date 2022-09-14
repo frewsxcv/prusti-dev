@@ -21,6 +21,10 @@ pub use prusti_contracts_proc_macros::trusted;
 /// A macro for type invariants.
 pub use prusti_contracts_proc_macros::invariant;
 
+/// A macro for structural type invariants. A type with a structural
+/// invariant needs to be managed manually by the user.
+pub use prusti_contracts_proc_macros::structural_invariant;
+
 /// A macro for writing a loop body invariant.
 pub use prusti_contracts_proc_macros::body_invariant;
 
@@ -59,6 +63,27 @@ pub use prusti_contracts_proc_macros::terminates;
 
 /// A macro to annotate body variant of a loop to prove termination
 pub use prusti_contracts_proc_macros::body_variant;
+
+/// A macro to manually pack a place capability.
+pub use prusti_contracts_proc_macros::pack;
+
+/// A macro to manually unpack a place capability.
+pub use prusti_contracts_proc_macros::unpack;
+
+/// A macro to manually join a place capability.
+pub use prusti_contracts_proc_macros::join;
+
+/// A macro to manually split a place capability.
+pub use prusti_contracts_proc_macros::split;
+
+/// A macro to forget that a place is initialized.
+pub use prusti_contracts_proc_macros::forget_initialization;
+
+/// A macro to restore a place capability.
+pub use prusti_contracts_proc_macros::restore;
+
+/// A macro to set a specific field of the union as active.
+pub use prusti_contracts_proc_macros::set_union_active_field;
 
 #[cfg(not(feature = "prusti"))]
 mod private {
@@ -336,6 +361,104 @@ pub fn snap<T>(_x: &T) -> T {
 /// are not. Importantly, addresses are not taken into consideration.
 pub fn snapshot_equality<T>(_l: T, _r: T) -> bool {
     true
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_pack_place<T>(_arg: T) {
+    unreachable!();
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_unpack_place<T>(_arg: T) {
+    unreachable!();
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_join_place<T>(_arg: T) {
+    unreachable!();
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_split_place<T>(_arg: T) {
+    unreachable!();
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_forget_initialization<T>(_arg: T) {
+    unreachable!();
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_restore_place<T>(_arg1: T, _arg2: T) {
+    unreachable!();
+}
+
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_set_union_active_field<T>(_arg: T) {
+    unreachable!();
+}
+
+/// Indicates that we have the `own` capability to the specified place.
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_own<T>(_place: T) -> bool {
+    true
+}
+
+#[macro_export]
+macro_rules! own {
+    ($place:expr) => {
+        $crate::prusti_own(unsafe { core::ptr::addr_of!($place) })
+    };
+}
+
+/// Indicates that we have the `raw` capability to the specified address.
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_raw<T>(_address: T, _size: usize) -> bool {
+    true
+}
+
+#[macro_export]
+macro_rules! raw {
+    ($place:expr, $size: expr) => {
+        $crate::prusti_raw(unsafe { core::ptr::addr_of!($place) }, $size)
+    };
+}
+
+/// Indicates that we have the capability to deallocate.
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_raw_dealloc<T>(_address: T, _size: usize) -> bool {
+    true
+}
+
+#[macro_export]
+macro_rules! raw_dealloc {
+    ($place:expr, $size: expr, $align: expr) => {
+        $crate::prusti_raw_dealloc(unsafe { core::ptr::addr_of!($place) }, $size)
+    };
+}
+
+/// Temporarily unpacks the owned predicate at the given location.
+#[doc(hidden)]
+#[trusted]
+pub fn prusti_unpacking<T, U>(_place: T, _body: U) -> U {
+    unimplemented!()
+}
+
+#[macro_export]
+macro_rules! unpacking {
+    ($place:expr, $body: expr) => {
+        $crate::prusti_unpacking(unsafe { core::ptr::addr_of!($place) }, $body)
+    };
 }
 
 pub use private::*;

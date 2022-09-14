@@ -37,6 +37,7 @@ pub enum PanicCause {
 pub enum BuiltinMethodKind {
     WriteConstant,
     MovePlace,
+    CopyPlace,
     IntoMemoryBlock,
     SplitMemoryBlock,
     JoinMemoryBlock,
@@ -44,6 +45,7 @@ pub enum BuiltinMethodKind {
     ChangeUniqueRefPlace,
     DuplicateFracRef,
     Assign,
+    RestoreRawBorrowed,
 }
 
 /// In case of verification error, this enum will contain additional information
@@ -180,6 +182,23 @@ pub enum ErrorCtxt {
     /// The state that fold-unfold algorithm deduced as unreachable, is actually
     /// reachable.
     UnreachableFoldingState,
+    /// A user-specified pack operation failed.
+    Pack,
+    /// A user-specified unpack operation failed.
+    Unpack,
+    /// A user-specified forget-initialization operation failed.
+    ForgetInitialization,
+    /// Restore a place borrowed via raw pointer.
+    RestoreRawBorrowed,
+    /// An error in the definition of the type invariant.
+    TypeInvariantDefinition,
+    /// Pointer dereference in the postcondition is not framed by permissions.
+    ///
+    /// Note: This can also be reported when the underlying solver failing to
+    /// prove that the postcondition implies itself.
+    MethodPostconditionFraming,
+    // /// Permission error when dereferencing a raw pointer.
+    // EnsureOwnedPredicate,
 }
 
 /// The error manager
@@ -404,6 +423,7 @@ impl<'tcx> ErrorManager<'tcx> {
                     .set_help("This might be a bug in the Rust compiler.")
             }
 
+            ("exhale.failed:assertion.false", ErrorCtxt::ExhaleMethodPrecondition) |
             ("assert.failed:assertion.false", ErrorCtxt::ExhaleMethodPrecondition) => {
                 PrustiError::verification("precondition might not hold.", error_span)
                     .set_failing_assertion(opt_cause_span)
@@ -559,9 +579,17 @@ impl<'tcx> ErrorManager<'tcx> {
                     .set_failing_assertion(opt_cause_span)
             }
 
-            ("assert.failed:assertion.false", ErrorCtxt::AssertMethodPostcondition) => {
+            ("assert.failed:assertion.false", ErrorCtxt::AssertMethodPostcondition)
+            |("exhale.failed:assertion.false", ErrorCtxt::AssertMethodPostcondition)=> {
                 PrustiError::verification("postcondition might not hold.".to_string(), error_span)
                     .push_primary_span(opt_cause_span)
+            }
+
+            ("inhale.failed:insufficient.permission", ErrorCtxt::MethodPostconditionFraming)
+            | ("application.precondition:insufficient.permission", ErrorCtxt::MethodPostconditionFraming) => {
+                PrustiError::verification("the postcondition might not be self-framing.".to_string(), error_span)
+                    .push_primary_span(opt_cause_span)
+                    .set_help("This error might be also caused by prover failing to prove that the postcondition implies itself")
             }
 
             (
@@ -697,6 +725,36 @@ impl<'tcx> ErrorManager<'tcx> {
                     "The loop variant might go below zero while the loop continues".to_string(),
                     error_span
                 )
+            }
+
+            ("call.precondition:insufficient.permission", ErrorCtxt::CopyPlace) => {
+                PrustiError::verification(
+                    "the accessed place may not be allocated or initialized".to_string(),
+                    error_span
+                ).set_failing_assertion(opt_cause_span)
+            }
+
+            ("call.precondition:insufficient.permission", ErrorCtxt::WritePlace) => {
+                PrustiError::verification(
+                    "the accessed memory location must be allocated and uninitialized".to_string(),
+                    error_span
+                ).set_failing_assertion(opt_cause_span)
+            }
+
+            ("exhale.failed:insufficient.permission", ErrorCtxt::AssertMethodPostcondition) |
+            ("application.precondition:insufficient.permission", ErrorCtxt::AssertMethodPostcondition) |
+            ("application.precondition:insufficient.permission", ErrorCtxt::TypeInvariantDefinition) => {
+                PrustiError::verification(
+                    "there might be insufficient permission to dereference a raw pointer".to_string(),
+                    error_span
+                ).set_failing_assertion(opt_cause_span)
+            }
+
+            ("call.precondition:assertion.false", ErrorCtxt::Assign) => {
+                PrustiError::verification(
+                    "the type invariant of the constructed object might not hold".to_string(),
+                    error_span
+                ).set_failing_assertion(opt_cause_span)
             }
 
             (full_err_id, ErrorCtxt::Unexpected) => {

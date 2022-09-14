@@ -3,7 +3,7 @@ use crate::encoder::{
     high::types::HighTypeEncoderInterface,
     middle::core_proof::{
         compute_address::ComputeAddressInterface,
-        lowerer::Lowerer,
+        lowerer::{FunctionsLowererInterface, Lowerer},
         places::PlacesInterface,
         predicates::{
             owned::builders::{
@@ -16,12 +16,18 @@ use crate::encoder::{
         types::TypesInterface,
     },
 };
+use prusti_common::config;
 use rustc_hash::FxHashSet;
 use vir_crate::{
-    common::identifier::WithIdentifier,
+    common::{
+        expression::{ExpressionIterator, GuardedExpressionIterator},
+        identifier::WithIdentifier,
+    },
     low::{self as vir_low},
     middle as vir_mid,
 };
+
+use super::builders::{OwnedNonAliasedSnapFunctionBuilder, UniqueRefSnapFunctionBuilder};
 
 pub(super) struct PredicateEncoder<'l, 'p, 'v, 'tcx> {
     lowerer: &'l mut Lowerer<'p, 'v, 'tcx>,
@@ -51,6 +57,117 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
         self.predicates
     }
 
+    pub(super) fn encode_owned_non_aliased_snapshot(
+        &mut self,
+        normalized_type: &vir_mid::Type,
+        type_decl: &vir_mid::TypeDecl,
+    ) -> SpannedEncodingResult<()> {
+        let mut builder =
+            OwnedNonAliasedSnapFunctionBuilder::new(self.lowerer, normalized_type, type_decl)?;
+        builder.create_parameters()?;
+        builder.add_owned_precondition()?;
+        builder.add_validity_postcondition()?;
+        match &type_decl {
+            vir_mid::TypeDecl::Bool
+            | vir_mid::TypeDecl::Int(_)
+            | vir_mid::TypeDecl::Float(_)
+            | vir_mid::TypeDecl::Pointer(_)
+            | vir_mid::TypeDecl::Sequence(_)
+            | vir_mid::TypeDecl::Map(_) => {
+                builder.add_bytes_snapshot_equality()?;
+            }
+            vir_mid::TypeDecl::Trusted(_) | vir_mid::TypeDecl::TypeVar(_) => {}
+            vir_mid::TypeDecl::Struct(decl) => {
+                let mut equalities = Vec::new();
+                for field in &decl.fields {
+                    equalities.push(builder.create_field_snapshot_equality(field)?);
+                }
+                builder.add_unfolding_postcondition(equalities.into_iter().conjoin())?;
+                builder.add_structural_invariant(decl)?;
+
+                // TODO: Struct invariant that relates heap value to the pure snapshot
+
+                //     function snap_owned_non_aliased$struct$m_T4$(place: Place, root_address: Address): Snap$struct$m_T4$
+                //     requires acc(OwnedNonAliased$struct$m_T4$(place, root_address), write)
+                //     ensures valid$Snap$struct$m_T4$(result)
+                //     ensures (unfolding acc(OwnedNonAliased$struct$m_T4$(place, root_address), write) in destructor$Snap$struct$m_T4$$$f$p(result) == snap_owned_non_aliased$ptr$struct$m_Pair$(field_place$$struct$m_T4$$$f$p(place), root_address))
+
+                //     ensures (unfolding acc(OwnedNonAliased$struct$m_T4$(place, root_address), write) in
+
+                //   (!destructor$Snap$Bool$$value(constructor$Snap$Bool$(destructor$Snap$ptr$struct$m_Pair$$$address(snap_owned_non_aliased$ptr$struct$m_Pair$(field_place$$struct$m_T4$$$f$p(place), root_address)) == null_address$())) ==>
+
+                //     destructor$Snap$struct$m_T4$$$f$p$deref(result) == snap_owned_non_aliased$struct$m_Pair$(aliased_place_root(), destructor$Snap$ptr$struct$m_Pair$$$address(snap_owned_non_aliased$ptr$struct$m_Pair$(field_place$$struct$m_T4$$$f$p(place), root_address))))
+
+                //     )
+            }
+            vir_mid::TypeDecl::Enum(decl) => {
+                let mut equalities = Vec::new();
+                if decl.safety.is_enum() {
+                    let discriminant_equality =
+                        builder.create_discriminant_snapshot_equality(decl)?;
+                    builder.add_unfolding_postcondition(discriminant_equality)?;
+                }
+                for (discriminant, variant) in decl.iter_discriminant_variants() {
+                    equalities
+                        .push(builder.create_variant_snapshot_equality(discriminant, variant)?);
+                }
+                builder.add_unfolding_postcondition(equalities.into_iter().create_match())?;
+            }
+            vir_mid::TypeDecl::Reference(decl) => {
+                builder.add_bytes_address_snapshot_equality()?;
+                // FIXME: Have a getter for the first lifetime.
+                let lifetime = &decl.lifetimes[0];
+                builder.add_reference_snapshot_equalities(decl, lifetime)?;
+            }
+            vir_mid::TypeDecl::Array(decl) => {
+                let length = if normalized_type.is_slice() {
+                    builder.get_slice_len()?
+                } else {
+                    decl.const_parameters[0].clone()
+                };
+                builder.add_snapshot_len_equal_to_postcondition(&length)?;
+                builder.add_quantifiers(&length, &decl.element_type)?;
+            }
+            _ => {
+                unimplemented!("{}", type_decl);
+            }
+        }
+        let function = builder.build()?;
+        self.lowerer.declare_function(function)?;
+        Ok(())
+    }
+
+    pub(super) fn encode_unique_ref_snapshot(
+        &mut self,
+        normalized_type: &vir_mid::Type,
+        type_decl: &vir_mid::TypeDecl,
+    ) -> SpannedEncodingResult<()> {
+        let mut builder =
+            UniqueRefSnapFunctionBuilder::new(self.lowerer, normalized_type, type_decl)?;
+        builder.create_parameters()?;
+        builder.add_unique_ref_precondition()?;
+        match &type_decl {
+            vir_mid::TypeDecl::Bool
+            | vir_mid::TypeDecl::Int(_)
+            | vir_mid::TypeDecl::Float(_)
+            | vir_mid::TypeDecl::Pointer(_)
+            | vir_mid::TypeDecl::Sequence(_)
+            | vir_mid::TypeDecl::Map(_) => {}
+            vir_mid::TypeDecl::Trusted(_) | vir_mid::TypeDecl::TypeVar(_) => {}
+            vir_mid::TypeDecl::Struct(_decl) => {}
+            vir_mid::TypeDecl::Enum(_decl) => {}
+            vir_mid::TypeDecl::Reference(_decl) => {}
+            vir_mid::TypeDecl::Array(_decl) => {}
+            _ => {
+                unimplemented!("{}", type_decl);
+            }
+        }
+        let (function_current, function_final) = builder.build()?;
+        self.lowerer.declare_function(function_current)?;
+        self.lowerer.declare_function(function_final)?;
+        Ok(())
+    }
+
     pub(super) fn encode_owned_non_aliased(
         &mut self,
         ty: &vir_mid::Type,
@@ -67,6 +184,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
         let normalized_type = ty.normalize_type();
         self.lowerer
             .encode_snapshot_to_bytes_function(&normalized_type)?;
+        if !config::use_snapshot_parameters_in_predicates() {
+            self.encode_owned_non_aliased_snapshot(&normalized_type, &type_decl)?;
+        }
         let mut owned_predicates_to_encode = Vec::new();
         let mut unique_ref_predicates_to_encode = Vec::new();
         let mut frac_ref_predicates_to_encode = Vec::new();
@@ -75,7 +195,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
         builder.create_parameters()?;
         if !(type_decl.is_type_var() || type_decl.is_trusted()) {
             builder.create_body();
-            builder.add_validity()?;
+            if config::use_snapshot_parameters_in_predicates() {
+                builder.add_validity()?;
+            }
         }
         // Build the body.
         match &type_decl {
@@ -86,7 +208,12 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
             | vir_mid::TypeDecl::Sequence(_)
             | vir_mid::TypeDecl::Map(_) => {
                 builder.add_base_memory_block()?;
-                builder.add_bytes_snapshot_equality()?;
+                if config::use_snapshot_parameters_in_predicates() {
+                    builder.add_bytes_snapshot_equality()?;
+                }
+                if let vir_mid::TypeDecl::Pointer(decl) = &type_decl {
+                    owned_predicates_to_encode.push(decl.target_type.clone());
+                }
             }
             vir_mid::TypeDecl::Trusted(_) | vir_mid::TypeDecl::TypeVar(_) => {}
             vir_mid::TypeDecl::Struct(decl) => {
@@ -100,6 +227,7 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
                         owned_predicates_to_encode.push(field.ty.clone());
                     }
                 }
+                builder.add_structural_invariant(decl)?;
             }
             vir_mid::TypeDecl::Enum(decl) => {
                 builder.add_padding_memory_block()?;
@@ -114,6 +242,7 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
                         decl.lifetimes.clone(),
                     );
                     variant_predicates.push(builder.create_variant_predicate(
+                        decl,
                         discriminant,
                         variant,
                         &variant_type,
@@ -139,7 +268,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
             }
             vir_mid::TypeDecl::Reference(decl) => {
                 builder.add_base_memory_block()?;
-                builder.add_bytes_address_snapshot_equality()?;
+                if config::use_snapshot_parameters_in_predicates() {
+                    builder.add_bytes_address_snapshot_equality()?;
+                }
                 // FIXME: Have a getter for the first lifetime.
                 let lifetime = &decl.lifetimes[0];
                 if decl.uniqueness.is_unique() {
@@ -163,7 +294,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
                 } else {
                     decl.const_parameters[0].clone()
                 };
-                builder.add_snapshot_len_equal_to(&length)?;
+                if config::use_snapshot_parameters_in_predicates() {
+                    builder.add_snapshot_len_equal_to(&length)?;
+                }
                 builder.add_quantified_permission(&length, &decl.element_type)?;
             }
             _ => {
@@ -300,6 +433,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
         // FIXME: Make get_type_decl_mid to return the erased ty for which it
         // returned type_decl.
         let normalized_type = ty.normalize_type();
+        if !config::use_snapshot_parameters_in_predicates() {
+            self.encode_unique_ref_snapshot(&normalized_type, &type_decl)?;
+        }
         let mut unique_ref_predicates_to_encode = Vec::new();
         let mut frac_ref_predicates_to_encode = Vec::new();
         let mut builder = UniqueRefBuilder::new(self.lowerer, &normalized_type, &type_decl)?;
@@ -316,7 +452,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
                 | vir_mid::TypeDecl::TypeVar(_)
         ) {
             builder.create_body();
-            builder.add_validity()?;
+            if config::use_snapshot_parameters_in_predicates() {
+                builder.add_validity()?;
+            }
         }
         // Build the body.
         match &type_decl {
@@ -355,12 +493,15 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
             vir_mid::TypeDecl::Reference(decl) => {
                 // FIXME: Have a getter for the first lifetime.
                 let lifetime = &decl.lifetimes[0];
+                let pointer_type = builder.add_unique_ref_pointer_predicate(lifetime)?;
                 if decl.uniqueness.is_unique() {
                     builder.add_unique_ref_target_predicate(&decl.target_type, lifetime)?;
                     unique_ref_predicates_to_encode.push(decl.target_type.clone());
+                    unique_ref_predicates_to_encode.push(pointer_type);
                 } else {
                     builder.add_frac_ref_target_predicate(&decl.target_type, lifetime)?;
                     frac_ref_predicates_to_encode.push(decl.target_type.clone());
+                    frac_ref_predicates_to_encode.push(pointer_type);
                 }
             }
             vir_mid::TypeDecl::Array(decl) => {
@@ -376,7 +517,9 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
                 } else {
                     decl.const_parameters[0].clone()
                 };
-                builder.add_snapshot_len_equal_to(&length)?;
+                if config::use_snapshot_parameters_in_predicates() {
+                    builder.add_snapshot_len_equal_to(&length)?;
+                }
                 builder.add_quantified_permission(&length, &decl.element_type)?;
             }
             _ => {

@@ -2,17 +2,18 @@ use super::{
     super::ast::{
         expression::{
             visitors::{
-                default_fold_expression, default_fold_quantifier, default_walk_expression,
-                ExpressionFolder, ExpressionWalker,
+                default_fold_expression, default_fold_quantifier, default_walk_binary_op,
+                default_walk_expression, ExpressionFolder, ExpressionWalker,
             },
             *,
         },
         position::Position,
+        predicate::visitors::{PredicateFolder, PredicateWalker},
         ty::{self, visitors::TypeFolder, LifetimeConst, Type},
     },
     ty::Typed,
 };
-use crate::common::expression::SyntacticEvaluation;
+use crate::common::expression::{ExpressionIterator, SyntacticEvaluation, UnaryOperationHelpers};
 use std::collections::BTreeMap;
 
 impl From<VariableDecl> for Expression {
@@ -193,6 +194,30 @@ impl Expression {
         }
     }
 
+    pub fn is_behind_pointer_dereference(&self) -> bool {
+        assert!(self.is_place());
+        if let Some(parent) = self.get_parent_ref() {
+            if self.is_deref() && parent.get_type().is_pointer() {
+                return true;
+            }
+            parent.is_behind_pointer_dereference()
+        } else {
+            false
+        }
+    }
+
+    pub fn get_last_dereferenced_pointer(&self) -> Option<&Expression> {
+        assert!(self.is_place());
+        if let Some(parent) = self.get_parent_ref() {
+            if self.is_deref() && parent.get_type().is_pointer() {
+                return Some(parent);
+            }
+            parent.get_last_dereferenced_pointer()
+        } else {
+            None
+        }
+    }
+
     #[must_use]
     pub fn erase_lifetime(self) -> Expression {
         struct DefaultLifetimeEraser {}
@@ -322,12 +347,20 @@ impl Expression {
                     default_fold_expression(self, expression)
                 }
             }
+            fn fold_predicate(&mut self, predicate: Predicate) -> Predicate {
+                PredicateFolder::fold_predicate(self, predicate)
+            }
+        }
+        impl<'a> PredicateFolder for PlaceReplacer<'a> {
+            fn fold_expression(&mut self, expression: Expression) -> Expression {
+                ExpressionFolder::fold_expression(self, expression)
+            }
         }
         let mut replacer = PlaceReplacer {
             target,
             replacement,
         };
-        replacer.fold_expression(self)
+        ExpressionFolder::fold_expression(&mut replacer, self)
     }
     #[must_use]
     pub fn replace_multiple_places(self, replacements: &[(Expression, Expression)]) -> Self {
@@ -364,8 +397,56 @@ impl Expression {
                 }
                 Expression::Quantifier(default_fold_quantifier(self, quantifier))
             }
+
+            fn fold_predicate(&mut self, predicate: Predicate) -> Predicate {
+                PredicateFolder::fold_predicate(self, predicate)
+            }
         }
-        PlaceReplacer { replacements }.fold_expression(self)
+        impl<'a> PredicateFolder for PlaceReplacer<'a> {
+            fn fold_expression(&mut self, expression: Expression) -> Expression {
+                ExpressionFolder::fold_expression(self, expression)
+            }
+        }
+        let mut replacer = PlaceReplacer { replacements };
+        ExpressionFolder::fold_expression(&mut replacer, self)
+    }
+    #[must_use]
+    pub fn replace_self(self, replacement: &Expression) -> Self {
+        struct PlaceReplacer<'a> {
+            replacement: &'a Expression,
+        }
+        impl<'a> ExpressionFolder for PlaceReplacer<'a> {
+            fn fold_local_enum(&mut self, local: Local) -> Expression {
+                if local.variable.is_self_variable() {
+                    assert_eq!(
+                        &local.variable.ty,
+                        self.replacement.get_type(),
+                        "{} → {}",
+                        local.variable.ty,
+                        self.replacement
+                    );
+                    self.replacement.clone()
+                } else {
+                    Expression::Local(local)
+                }
+            }
+            fn fold_predicate(&mut self, predicate: Predicate) -> Predicate {
+                PredicateFolder::fold_predicate(self, predicate)
+            }
+        }
+        impl<'a> PredicateFolder for PlaceReplacer<'a> {
+            fn fold_expression(&mut self, expression: Expression) -> Expression {
+                ExpressionFolder::fold_expression(self, expression)
+            }
+        }
+        let mut replacer = PlaceReplacer { replacement };
+        ExpressionFolder::fold_expression(&mut replacer, self)
+    }
+    pub fn peel_unfoldings(&self) -> &Self {
+        match self {
+            Expression::Unfolding(unfolding) => unfolding.body.peel_unfoldings(),
+            _ => self,
+        }
     }
     #[must_use]
     pub fn map_old_expression_label<F>(self, substitutor: F) -> Self
@@ -545,13 +626,21 @@ impl Expression {
                     default_walk_expression(self, expr)
                 }
             }
+            fn walk_predicate(&mut self, predicate: &Predicate) {
+                PredicateWalker::walk_predicate(self, predicate)
+            }
+        }
+        impl<'a> PredicateWalker for ExprFinder<'a> {
+            fn walk_expression(&mut self, expr: &Expression) {
+                ExpressionWalker::walk_expression(self, expr)
+            }
         }
 
         let mut finder = ExprFinder {
             sub_target,
             found: false,
         };
-        finder.walk_expression(self);
+        ExpressionWalker::walk_expression(&mut finder, self);
         finder.found
     }
     pub fn function_call<S: Into<String>>(
@@ -685,5 +774,143 @@ impl Expression {
 
     pub fn full_permission() -> Self {
         Self::constant_no_pos(ConstantValue::Int(1), Type::MPerm)
+    }
+
+    pub fn is_pure(&self) -> bool {
+        struct Checker {
+            is_pure: bool,
+        }
+        impl ExpressionWalker for Checker {
+            fn walk_acc_predicate(&mut self, _: &AccPredicate) {
+                self.is_pure = false;
+            }
+        }
+        let mut checker = Checker { is_pure: true };
+        checker.walk_expression(self);
+        checker.is_pure
+    }
+}
+
+/// Methods for collecting places.
+impl Expression {
+    /// Returns place used in `own`.
+    pub fn collect_owned_places(&self) -> Vec<Expression> {
+        struct Collector {
+            owned_places: Vec<Expression>,
+        }
+        impl<'a> ExpressionWalker for Collector {
+            fn walk_acc_predicate(&mut self, acc_predicate: &AccPredicate) {
+                match &*acc_predicate.predicate {
+                    Predicate::LifetimeToken(_)
+                    | Predicate::MemoryBlockStack(_)
+                    | Predicate::MemoryBlockStackDrop(_)
+                    | Predicate::MemoryBlockHeap(_)
+                    | Predicate::MemoryBlockHeapDrop(_) => {}
+                    Predicate::OwnedNonAliased(predicate) => {
+                        self.owned_places.push(predicate.place.clone());
+                    }
+                }
+            }
+        }
+        let mut collector = Collector {
+            owned_places: Vec::new(),
+        };
+        collector.walk_expression(self);
+        collector.owned_places
+    }
+
+    /// Returns places used in `own` with path conditions that guard them.
+    pub fn collect_guarded_owned_places(&self) -> Vec<(Expression, Expression)> {
+        struct Collector {
+            path_condition: Vec<Expression>,
+            owned_places: Vec<(Expression, Expression)>,
+        }
+        impl<'a> ExpressionWalker for Collector {
+            fn walk_acc_predicate(&mut self, acc_predicate: &AccPredicate) {
+                match &*acc_predicate.predicate {
+                    Predicate::LifetimeToken(_)
+                    | Predicate::MemoryBlockStack(_)
+                    | Predicate::MemoryBlockStackDrop(_)
+                    | Predicate::MemoryBlockHeap(_)
+                    | Predicate::MemoryBlockHeapDrop(_) => {}
+                    Predicate::OwnedNonAliased(predicate) => {
+                        self.owned_places.push((
+                            self.path_condition.iter().cloned().conjoin(),
+                            predicate.place.clone(),
+                        ));
+                    }
+                }
+            }
+            fn walk_binary_op(&mut self, binary_op: &BinaryOp) {
+                if binary_op.op_kind == BinaryOpKind::Implies {
+                    self.path_condition.push((*binary_op.left).clone());
+                    self.walk_expression(&binary_op.right);
+                    self.path_condition.pop();
+                } else {
+                    default_walk_binary_op(self, binary_op);
+                }
+            }
+            fn walk_conditional(&mut self, conditional: &Conditional) {
+                self.path_condition.push((*conditional.guard).clone());
+                self.walk_expression(&conditional.then_expr);
+                let guard = self.path_condition.pop().unwrap();
+                self.path_condition.push((Expression::not(guard)));
+                self.walk_expression(&conditional.else_expr);
+                self.path_condition.pop();
+            }
+        }
+        let mut collector = Collector {
+            path_condition: Vec::new(),
+            owned_places: Vec::new(),
+        };
+        collector.walk_expression(self);
+        collector.owned_places
+    }
+
+    /// Returns places that contain dereferences with their path conditions.
+    pub fn collect_guarded_dereferenced_places(&self) -> Vec<(Expression, Expression)> {
+        struct Collector {
+            path_condition: Vec<Expression>,
+            deref_places: Vec<(Expression, Expression)>,
+        }
+        impl<'a> ExpressionWalker for Collector {
+            fn walk_expression(&mut self, expression: &Expression) {
+                if expression.is_place() {
+                    if expression.get_last_dereferenced_pointer().is_some() {
+                        self.deref_places.push((
+                            self.path_condition.iter().cloned().conjoin(),
+                            expression.clone(),
+                        ));
+                    }
+                } else {
+                    default_walk_expression(self, expression)
+                }
+            }
+            fn walk_binary_op(&mut self, binary_op: &BinaryOp) {
+                if binary_op.op_kind == BinaryOpKind::Implies {
+                    self.walk_expression(&binary_op.left);
+                    self.path_condition.push((*binary_op.left).clone());
+                    self.walk_expression(&binary_op.right);
+                    self.path_condition.pop();
+                } else {
+                    default_walk_binary_op(self, binary_op);
+                }
+            }
+            fn walk_conditional(&mut self, conditional: &Conditional) {
+                self.walk_expression(&conditional.guard);
+                self.path_condition.push((*conditional.guard).clone());
+                self.walk_expression(&conditional.then_expr);
+                let guard = self.path_condition.pop().unwrap();
+                self.path_condition.push((Expression::not(guard)));
+                self.walk_expression(&conditional.else_expr);
+                self.path_condition.pop();
+            }
+        }
+        let mut collector = Collector {
+            path_condition: Vec::new(),
+            deref_places: Vec::new(),
+        };
+        collector.walk_expression(self);
+        collector.deref_places
     }
 }

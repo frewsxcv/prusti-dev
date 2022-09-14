@@ -18,6 +18,8 @@ pub(in super::super) fn collect_permission_changes<'v, 'tcx>(
         &mut consumed_permissions,
         &mut produced_permissions,
     )?;
+    consumed_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
+    produced_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
     Ok((consumed_permissions, produced_permissions))
 }
 
@@ -45,10 +47,16 @@ impl CollectPermissionChanges for vir_typed::Statement {
             vir_typed::Statement::OldLabel(statement) => {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
-            vir_typed::Statement::Inhale(statement) => {
+            vir_typed::Statement::InhalePredicate(statement) => {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
-            vir_typed::Statement::Exhale(statement) => {
+            vir_typed::Statement::ExhalePredicate(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::InhaleExpression(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::ExhaleExpression(statement) => {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
             vir_typed::Statement::Consume(statement) => {
@@ -91,6 +99,24 @@ impl CollectPermissionChanges for vir_typed::Statement {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
             vir_typed::Statement::SetUnionVariant(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::Pack(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::Unpack(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::Join(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::Split(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::ForgetInitialization(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
+            vir_typed::Statement::RestoreRawBorrowed(statement) => {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
             vir_typed::Statement::NewLft(statement) => {
@@ -200,7 +226,7 @@ fn extract_managed_predicate_place(
     }
 }
 
-impl CollectPermissionChanges for vir_typed::Inhale {
+impl CollectPermissionChanges for vir_typed::InhalePredicate {
     fn collect<'v, 'tcx>(
         &self,
         _encoder: &mut Encoder<'v, 'tcx>,
@@ -212,7 +238,7 @@ impl CollectPermissionChanges for vir_typed::Inhale {
     }
 }
 
-impl CollectPermissionChanges for vir_typed::Exhale {
+impl CollectPermissionChanges for vir_typed::ExhalePredicate {
     fn collect<'v, 'tcx>(
         &self,
         _encoder: &mut Encoder<'v, 'tcx>,
@@ -220,6 +246,28 @@ impl CollectPermissionChanges for vir_typed::Exhale {
         _produced_permissions: &mut Vec<Permission>,
     ) -> SpannedEncodingResult<()> {
         consumed_permissions.extend(extract_managed_predicate_place(&self.predicate)?);
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::InhaleExpression {
+    fn collect<'v, 'tcx>(
+        &self,
+        _encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::ExhaleExpression {
+    fn collect<'v, 'tcx>(
+        &self,
+        _encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
         Ok(())
     }
 }
@@ -383,6 +431,9 @@ impl CollectPermissionChanges for vir_typed::Rvalue {
             Self::Len(rvalue) => {
                 rvalue.collect(encoder, consumed_permissions, produced_permissions)
             }
+            Self::Cast(rvalue) => {
+                rvalue.collect(encoder, consumed_permissions, produced_permissions)
+            }
             Self::UnaryOp(rvalue) => {
                 rvalue.collect(encoder, consumed_permissions, produced_permissions)
             }
@@ -456,7 +507,7 @@ impl CollectPermissionChanges for vir_typed::ast::rvalue::AddressOf {
         &self,
         _encoder: &mut Encoder<'v, 'tcx>,
         consumed_permissions: &mut Vec<Permission>,
-        produced_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
     ) -> SpannedEncodingResult<()> {
         // To take an address of a place on a stack, it must not be moved out.
         // The following fails to compile:
@@ -476,7 +527,6 @@ impl CollectPermissionChanges for vir_typed::ast::rvalue::AddressOf {
         // }
         // ```
         consumed_permissions.push(Permission::Owned(self.place.clone()));
-        produced_permissions.push(Permission::Owned(self.place.clone()));
         Ok(())
     }
 }
@@ -490,6 +540,19 @@ impl CollectPermissionChanges for vir_typed::ast::rvalue::Len {
     ) -> SpannedEncodingResult<()> {
         consumed_permissions.push(Permission::Owned(self.place.clone()));
         produced_permissions.push(Permission::Owned(self.place.clone()));
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::ast::rvalue::Cast {
+    fn collect<'v, 'tcx>(
+        &self,
+        encoder: &mut Encoder<'v, 'tcx>,
+        consumed_permissions: &mut Vec<Permission>,
+        produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        self.operand
+            .collect(encoder, consumed_permissions, produced_permissions)?;
         Ok(())
     }
 }
@@ -613,6 +676,150 @@ impl CollectPermissionChanges for vir_typed::SetUnionVariant {
             .unwrap();
         consumed_permissions.push(Permission::MemoryBlock(parent.clone()));
         produced_permissions.push(Permission::MemoryBlock(self.variant_place.clone()));
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::Pack {
+    fn collect<'v, 'tcx>(
+        &self,
+        encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        if self.place.is_behind_pointer_dereference() {
+            produced_permissions.push(Permission::Owned(self.place.clone()));
+        } else {
+            let type_decl = encoder.encode_type_def_typed(self.place.get_type())?;
+            if let vir_typed::TypeDecl::Struct(decl) = &type_decl {
+                if decl.is_manually_managed_type() {
+                    produced_permissions.push(Permission::Owned(self.place.clone()));
+                } else {
+                    unimplemented!(
+                        "Unpacking an automatically managed type: {:?}\n{:?}",
+                        self.place,
+                        type_decl
+                    );
+                }
+            } else {
+                unimplemented!(
+                    "Report a proper error message that only structs can be unfolded: {:?}",
+                    self.place
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::Unpack {
+    fn collect<'v, 'tcx>(
+        &self,
+        encoder: &mut Encoder<'v, 'tcx>,
+        consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        if self.place.is_behind_pointer_dereference() {
+            consumed_permissions.push(Permission::Owned(self.place.clone()));
+        } else {
+            let type_decl = encoder.encode_type_def_typed(self.place.get_type())?;
+            if let vir_typed::TypeDecl::Struct(decl) = &type_decl {
+                if decl.is_manually_managed_type() {
+                    consumed_permissions.push(Permission::Owned(self.place.clone()));
+                } else {
+                    unimplemented!(
+                        "Unpacking an automatically managed type: {:?}\n{:?}",
+                        self.place,
+                        type_decl
+                    );
+                }
+            } else {
+                unimplemented!(
+                    "Report a proper error message that only structs can be unfolded: {:?}",
+                    self.place
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::Join {
+    fn collect<'v, 'tcx>(
+        &self,
+        _encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        if !self.place.is_behind_pointer_dereference() {
+            unimplemented!(
+                "Report a proper error message that only memory blocks behind \
+                a raw pointer could be joined by hand: {}",
+                self.place
+            );
+        }
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::Split {
+    fn collect<'v, 'tcx>(
+        &self,
+        _encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        if !self.place.is_behind_pointer_dereference() {
+            unimplemented!(
+                "Report a proper error message that only memory blocks behind \
+                a raw pointer could be split by hand: {}",
+                self.place
+            );
+        }
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::ForgetInitialization {
+    fn collect<'v, 'tcx>(
+        &self,
+        encoder: &mut Encoder<'v, 'tcx>,
+        consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        if self.place.is_behind_pointer_dereference() {
+            consumed_permissions.push(Permission::Owned(self.place.clone()));
+        } else {
+            let type_decl = encoder.encode_type_def_typed(self.place.get_type())?;
+            if let vir_typed::TypeDecl::Struct(decl) = &type_decl {
+                if decl.is_manually_managed_type() {
+                    consumed_permissions.push(Permission::Owned(self.place.clone()));
+                } else {
+                    unimplemented!(
+                        "Forgetting initialization of an automatically managed type: {:?}\n{:?}",
+                        self.place,
+                        type_decl
+                    );
+                }
+            } else {
+                unimplemented!(
+                    "Report a proper error message that only structs can be unfolded: {:?}",
+                    self.place
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::RestoreRawBorrowed {
+    fn collect<'v, 'tcx>(
+        &self,
+        _encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        produced_permissions.push(Permission::Owned(self.restored_place.clone()));
         Ok(())
     }
 }

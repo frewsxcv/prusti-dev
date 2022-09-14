@@ -9,5 +9,6 @@ pub(super) mod memory_block_split;
 pub(super) mod memory_block_split_join_common;
 pub(super) mod move_copy_place_common;
 pub(super) mod move_place;
+pub(super) mod restore_raw_borrowed;
 pub(super) mod write_address_constant;
 pub(super) mod write_place_constant;

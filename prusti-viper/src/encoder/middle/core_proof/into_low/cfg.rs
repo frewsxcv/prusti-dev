@@ -9,11 +9,13 @@ use crate::encoder::{
         lifetimes::LifetimesInterface,
         lowerer::{Lowerer, VariablesLowererInterface},
         places::PlacesInterface,
+        pointers::PointersInterface,
         predicates::{PredicatesMemoryBlockInterface, PredicatesOwnedInterface},
         references::ReferencesInterface,
         snapshots::{
-            IntoProcedureBoolExpression, IntoProcedureFinalSnapshot, IntoProcedureSnapshot,
-            SnapshotValidityInterface, SnapshotValuesInterface, SnapshotVariablesInterface,
+            IntoProcedureAssertion, IntoProcedureBoolExpression, IntoProcedureFinalSnapshot,
+            IntoProcedureSnapshot, SnapshotValidityInterface, SnapshotValuesInterface,
+            SnapshotVariablesInterface,
         },
     },
 };
@@ -47,7 +49,7 @@ impl IntoLow for vir_mid::Statement {
                 lowerer.save_old_label(label.name)?;
                 Ok(Vec::new())
             }
-            Self::Inhale(statement) => {
+            Self::InhalePredicate(statement) => {
                 if let vir_mid::Predicate::OwnedNonAliased(owned) = &statement.predicate {
                     lowerer.mark_owned_non_aliased_as_unfolded(owned.place.get_type())?;
                 }
@@ -56,7 +58,7 @@ impl IntoLow for vir_mid::Statement {
                     statement.position,
                 )])
             }
-            Self::Exhale(statement) => {
+            Self::ExhalePredicate(statement) => {
                 if let vir_mid::Predicate::OwnedNonAliased(owned) = &statement.predicate {
                     lowerer.mark_owned_non_aliased_as_unfolded(owned.place.get_type())?;
                 }
@@ -92,13 +94,34 @@ impl IntoLow for vir_mid::Statement {
                 )?;
                 Ok(statements)
             }
-            Self::Assume(statement) => Ok(vec![Statement::assume(
-                statement.expression.to_procedure_bool_expression(lowerer)?,
+            Self::InhaleExpression(statement) => Ok(vec![Statement::inhale(
+                statement.expression.to_procedure_assertion(lowerer)?,
                 statement.position,
             )]),
+            Self::ExhaleExpression(statement) => {
+                let assertion = statement.expression.to_procedure_assertion(lowerer)?;
+                let exhale = Statement::exhale(assertion, statement.position);
+                Ok(vec![exhale])
+            }
+            Self::Assume(statement) => {
+                assert!(
+                    statement.expression.is_pure(),
+                    "must be pure: {}",
+                    statement.expression
+                );
+                Ok(vec![Statement::assume(
+                    statement.expression.to_procedure_assertion(lowerer)?,
+                    statement.position,
+                )])
+            }
             Self::Assert(statement) => {
+                assert!(
+                    statement.expression.is_pure(),
+                    "must be pure: {}",
+                    statement.expression
+                );
                 let assert = Statement::assert(
-                    statement.expression.to_procedure_bool_expression(lowerer)?,
+                    statement.expression.to_procedure_assertion(lowerer)?,
                     statement.position,
                 );
                 let low_statement = if let Some(condition) = statement.condition {
@@ -123,7 +146,7 @@ impl IntoLow for vir_mid::Statement {
                 let place = lowerer.encode_expression_as_place(&statement.place)?;
                 let root_address = lowerer.extract_root_address(&statement.place)?;
                 let snapshot = statement.place.to_procedure_snapshot(lowerer)?;
-                let predicate = lowerer.owned_non_aliased(
+                let predicate = lowerer.owned_non_aliased_predicate(
                     CallContext::Procedure,
                     ty,
                     ty,
@@ -132,6 +155,7 @@ impl IntoLow for vir_mid::Statement {
                     snapshot,
                     None,
                 )?;
+                assert!(predicate.is_predicate_access_predicate());
                 let mut low_statement = vir_low::Statement::fold_no_pos(predicate);
                 if let Some(condition) = statement.condition {
                     let low_condition = lowerer.lower_block_marker_condition(condition)?;
@@ -146,10 +170,10 @@ impl IntoLow for vir_mid::Statement {
             Self::UnfoldOwned(statement) => {
                 let ty = statement.place.get_type();
                 lowerer.mark_owned_non_aliased_as_unfolded(ty)?;
-                let place = lowerer.encode_expression_as_place(&statement.place)?;
                 let root_address = lowerer.extract_root_address(&statement.place)?;
                 let snapshot = statement.place.to_procedure_snapshot(lowerer)?;
-                let predicate = lowerer.owned_non_aliased(
+                let place = lowerer.encode_expression_as_place(&statement.place)?;
+                let predicate = lowerer.owned_non_aliased_predicate(
                     CallContext::Procedure,
                     ty,
                     ty,
@@ -158,6 +182,7 @@ impl IntoLow for vir_mid::Statement {
                     snapshot,
                     None,
                 )?;
+                assert!(predicate.is_predicate_access_predicate());
                 let mut low_statement = vir_low::Statement::unfold_no_pos(predicate);
                 if let Some(condition) = statement.condition {
                     let low_condition = lowerer.lower_block_marker_condition(condition)?;
@@ -198,6 +223,7 @@ impl IntoLow for vir_mid::Statement {
                         current_snapshot,
                         final_snapshot,
                         lifetime.into(),
+                        None,
                     )?
                 };
                 let mut low_statement = vir_low::Statement::fold_no_pos(predicate);
@@ -240,6 +266,7 @@ impl IntoLow for vir_mid::Statement {
                         current_snapshot,
                         final_snapshot,
                         lifetime.into(),
+                        None,
                     )?
                 };
                 let mut low_statement = vir_low::Statement::unfold_no_pos(predicate);
@@ -403,6 +430,7 @@ impl IntoLow for vir_mid::Statement {
                             current_snapshot,
                             final_snapshot,
                             deref_lifetime,
+                            None, // FIXME
                         )?
                     } else {
                         lowerer.frac_ref(
@@ -447,6 +475,39 @@ impl IntoLow for vir_mid::Statement {
                     }
                 };
                 Ok(vec![low_statement])
+            }
+            Self::RestoreRawBorrowed(statement) => {
+                let ty = statement.restored_place.get_type();
+                lowerer.encode_restore_raw_borrowed_method(ty)?;
+                let borrowing_place_parent = statement.borrowing_place.get_parent_ref().unwrap();
+                let borrowing_snapshot = borrowing_place_parent.to_procedure_snapshot(lowerer)?;
+                let borrowing_address = lowerer.pointer_address(
+                    borrowing_place_parent.get_type(),
+                    borrowing_snapshot,
+                    statement.position,
+                )?;
+                let restored_place =
+                    lowerer.encode_expression_as_place(&statement.restored_place)?;
+                let restored_root_address =
+                    lowerer.extract_root_address(&statement.restored_place)?;
+                let snapshot = statement.borrowing_place.to_procedure_snapshot(lowerer)?;
+                let mut statements = vec![lowerer.call_restore_raw_borrowed_method(
+                    CallContext::Procedure,
+                    ty,
+                    ty,
+                    statement.position,
+                    borrowing_address,
+                    restored_place,
+                    restored_root_address,
+                    snapshot.clone(),
+                )?];
+                lowerer.encode_snapshot_update(
+                    &mut statements,
+                    &statement.restored_place,
+                    snapshot,
+                    statement.position,
+                )?;
+                Ok(statements)
             }
             Self::MovePlace(statement) => {
                 // TODO: Remove code duplication with Self::CopyPlace
@@ -651,6 +712,7 @@ impl IntoLow for vir_mid::Statement {
                             current_snapshot.clone(),
                             final_snapshot.clone(),
                             lifetime.into(),
+                            None, // FIXME: This should be a proper value
                         )?;
                         lowerer.mark_unique_ref_as_used(ty)?;
                         let mut statements = vec![
@@ -977,7 +1039,7 @@ impl IntoLow for vir_mid::Predicate {
                 lowerer.encode_memory_block_predicate()?;
                 let place = lowerer.encode_expression_as_place_address(&predicate.place)?;
                 let size = predicate.size.to_procedure_snapshot(lowerer)?;
-                expr! { acc(MemoryBlock([place], [size]))}.set_default_position(predicate.position)
+                lowerer.encode_memory_block_stack_acc(place, size, predicate.position)?
             }
             Predicate::MemoryBlockStackDrop(predicate) => {
                 let place = lowerer.encode_expression_as_place_address(&predicate.place)?;

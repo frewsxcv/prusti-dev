@@ -6,6 +6,7 @@ use crate::encoder::{
     middle::core_proof::{lowerer::Lowerer, snapshots::into_snapshot::common::IntoSnapshotLowerer},
 };
 use vir_crate::{
+    common::expression::ExpressionIterator,
     low::{self as vir_low},
     middle::{self as vir_mid},
 };
@@ -26,6 +27,34 @@ impl IntoProcedureBoolExpression for vir_mid::Expression {
         lowerer: &mut Lowerer<'p, 'v, 'tcx>,
     ) -> SpannedEncodingResult<Self::Target> {
         ProcedureSnapshot::default().expression_to_snapshot(lowerer, self, true)
+    }
+}
+
+/// Converts `self` into assertion that evaluates to a Viper Bool.
+pub(in super::super::super::super) trait IntoProcedureAssertion {
+    type Target;
+    fn to_procedure_assertion<'p, 'v: 'p, 'tcx: 'v>(
+        &self,
+        lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+    ) -> SpannedEncodingResult<Self::Target>;
+}
+
+impl IntoProcedureAssertion for vir_mid::Expression {
+    type Target = vir_low::Expression;
+    fn to_procedure_assertion<'p, 'v: 'p, 'tcx: 'v>(
+        &self,
+        lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+    ) -> SpannedEncodingResult<Self::Target> {
+        let mut snapshot_encoder = ProcedureSnapshot {
+            is_assertion: true,
+            ..ProcedureSnapshot::default()
+        };
+        let expression = snapshot_encoder.expression_to_snapshot(lowerer, self, true)?;
+        Ok(snapshot_encoder
+            .in_heap_assertions
+            .into_iter()
+            .chain(std::iter::once(expression))
+            .conjoin())
     }
 }
 

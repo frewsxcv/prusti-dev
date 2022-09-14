@@ -15,11 +15,13 @@ use crate::encoder::{
     high::types::HighTypeEncoderInterface,
     middle::core_proof::{
         addresses::AddressesInterface,
+        footprint::FootprintInterface,
         lowerer::{DomainsLowererInterface, Lowerer},
         snapshots::{
-            IntoPureSnapshot, IntoSnapshot, SnapshotAdtsInterface, SnapshotDomainsInterface,
-            SnapshotValidityInterface, SnapshotValuesInterface,
+            IntoPureBoolExpression, IntoPureSnapshot, IntoSnapshot, SnapshotAdtsInterface,
+            SnapshotDomainsInterface, SnapshotValidityInterface, SnapshotValuesInterface,
         },
+        type_layouts::TypeLayoutsInterface,
     },
 };
 use prusti_common::config;
@@ -31,7 +33,7 @@ use vir_crate::{
         identifier::WithIdentifier,
     },
     low::{self as vir_low},
-    middle as vir_mid,
+    middle::{self as vir_mid},
 };
 
 #[derive(Default)]
@@ -63,6 +65,11 @@ trait Private {
         parameters: Vec<vir_low::VariableDecl>,
         evaluation_result: vir_low::Expression,
     ) -> SpannedEncodingResult<()>;
+    // fn purify_structural_invariant(
+    //     &mut self,
+    //     structural_invariant: Vec<vir_mid::Expression>,
+    //     field_count: usize,
+    // ) -> SpannedEncodingResult<Vec<vir_mid::Expression>>;
 }
 
 impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
@@ -130,8 +137,24 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         field.ty.to_snapshot(self)?,
                     ));
                 }
+                let invariant = if let Some(invariant) = &decl.structural_invariant {
+                    let invariant = self.structural_invariant_to_pure_expression(
+                        invariant.clone(),
+                        ty,
+                        decl,
+                        &mut parameters,
+                    )?;
+                    let mut conjuncts = Vec::new();
+                    for expression in invariant {
+                        conjuncts.push(expression.to_pure_bool_expression(self)?);
+                    }
+
+                    conjuncts.into_iter().conjoin() //.remove_acc_predicates()
+                } else {
+                    true.into()
+                };
                 self.register_struct_constructor(&domain_name, parameters.clone())?;
-                self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
+                self.encode_validity_axioms_struct(&domain_name, parameters, invariant)?;
             }
             vir_mid::TypeDecl::Enum(decl) => {
                 let mut variants = Vec::new();
@@ -159,25 +182,40 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
             vir_mid::TypeDecl::Pointer(decl) => {
                 self.ensure_type_definition(&decl.target_type)?;
                 let address_type = self.address_type()?;
-                self.register_constant_constructor(&domain_name, address_type.clone())?;
-                self.encode_validity_axioms_primitive(&domain_name, address_type, true.into())?;
+                let mut parameters = vec![vir_low::VariableDecl::new("address", address_type)];
+                if decl.target_type.is_slice() {
+                    let len_type = self.size_type()?;
+                    parameters.push(vir_low::VariableDecl::new("len", len_type));
+                }
+                self.register_struct_constructor(&domain_name, parameters.clone())?;
+                // self.register_constant_constructor(&domain_name, address_type.clone())?;
+                // self.encode_validity_axioms_primitive(&domain_name, address_type, true.into())?;
+                self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
             }
-            vir_mid::TypeDecl::Reference(reference) => {
-                self.ensure_type_definition(&reference.target_type)?;
-                let target_type = reference.target_type.to_snapshot(self)?;
-                if reference.uniqueness.is_unique() {
-                    let parameters = vars! {
+            vir_mid::TypeDecl::Reference(decl) => {
+                self.ensure_type_definition(&decl.target_type)?;
+                let target_type = decl.target_type.to_snapshot(self)?;
+                if decl.uniqueness.is_unique() {
+                    let mut parameters = vars! {
                         address: Address,
                         target_current: {target_type.clone()},
                         target_final: {target_type}
                     };
+                    if decl.target_type.is_slice() {
+                        let len_type = self.size_type()?;
+                        parameters.push(vir_low::VariableDecl::new("len", len_type));
+                    }
                     self.register_struct_constructor(&domain_name, parameters.clone())?;
                     self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
                 } else {
-                    let parameters = vars! {
+                    let mut parameters = vars! {
                         address: Address,
                         target_current: {target_type.clone()}
                     };
+                    if decl.target_type.is_slice() {
+                        let len_type = self.size_type()?;
+                        parameters.push(vir_low::VariableDecl::new("len", len_type));
+                    }
                     self.register_struct_constructor(&domain_name, parameters.clone())?;
                     self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
                     let no_alloc_parameters = vars! { target_current: {target_type} };
@@ -281,6 +319,87 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
         }
         Ok(())
     }
+
+    // fn purify_structural_invariant(
+    //     &mut self,
+    //     structural_invariant: Vec<vir_mid::Expression>,
+    //     field_count: usize,
+    // ) -> SpannedEncodingResult<Vec<vir_mid::Expression>> {
+
+    //     // TODO: Create deref fields in vir_high together with a required
+    //     // structural invariant that links their values? Probably does not work
+    //     // because I need different treatment in predicate and snapshot
+    //     // encoders.
+
+    //     // TODO: Maybe a better idea would be to have code that computes a
+    //     // footprint of an expression? Then I could also use it for pure
+    //     // functions.
+
+    //     struct Purifier<'l, 'p, 'v, 'tcx> {
+    //         lowerer: &'l mut Lowerer<'p, 'v, 'tcx>,
+    //         field_count: usize,
+    //     }
+    //     impl<'l, 'p, 'v, 'tcx> vir_mid::visitors::ExpressionFolder for Purifier<'l, 'p, 'v, 'tcx> {
+    //         fn fold_acc_predicate_enum(
+    //             &mut self,
+    //             acc_predicate: vir_mid::AccPredicate,
+    //         ) -> vir_mid::Expression {
+    //             match *acc_predicate.predicate {
+    //                 vir_mid::Predicate::LifetimeToken(_) => {
+    //                     unimplemented!()
+    //                 }
+    //                 vir_mid::Predicate::MemoryBlockStack(_)
+    //                 | vir_mid::Predicate::MemoryBlockStackDrop(_)
+    //                 | vir_mid::Predicate::MemoryBlockHeap(_)
+    //                 | vir_mid::Predicate::MemoryBlockHeapDrop(_) => true.into(),
+    //                 vir_mid::Predicate::OwnedNonAliased(predicate) => {
+    //                     match predicate.place {
+    //                         vir_mid::Expression::Deref(vir_mid::Deref {
+    //                             base:
+    //                                 box vir_mid::Expression::Field(vir_mid::Field {
+    //                                     box base,
+    //                                     field,
+    //                                     ..
+    //                                 }),
+    //                             ty,
+    //                             position,
+    //                         }) => {
+    //                             // let parameter = vir_mid::VariableDecl::new(
+    //                             //     format!("{}$deref", field.name),
+    //                             //     ty,
+    //                             // );
+    //                             let app = vir_mid::Expression::builtin_func_app(
+    //                                 vir_mid::BuiltinFunc::IsValid,
+    //                                 Vec::new(),
+    //                                 vec![
+    //                                     vir_mid::Expression::field(
+    //                                         base,
+    //                                         vir_mid::FieldDecl {
+    //                                             name: format!("{}$deref", field.name),
+    //                                             index: self.field_count,
+    //                                             ty,
+    //                                         },
+    //                                         position,
+    //                                     )],
+    //                                 vir_mid::Type::Bool,
+    //                                 position,
+    //                             );
+    //                             self.field_count += 1;
+    //                             app
+    //                             // self.lowerer.encode_snapshot_valid_call_for_type(parameter.into(), ty)?
+    //                         }
+    //                         _ => unimplemented!(),
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     let mut purifier = Purifier { lowerer: self, field_count };
+    //     Ok(structural_invariant
+    //         .into_iter()
+    //         .map(|expression| purifier.fold_expression(expression))
+    //         .collect())
+    // }
 }
 
 pub(in super::super) trait TypesInterface {

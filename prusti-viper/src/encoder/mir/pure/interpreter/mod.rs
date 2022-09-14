@@ -318,8 +318,19 @@ impl<'p, 'v: 'p, 'tcx: 'v> ExpressionBackwardInterpreter<'p, 'v, 'tcx> {
                 let expr = vir_high::Expression::constructor_no_pos(ty, arguments);
                 state.substitute_value(&encoded_lhs, expr);
             }
+            mir::Rvalue::AddressOf(_, place) => {
+                let encoded_place = self.encoder.encode_place_high(self.mir, *place, None)?;
+                let ty = self
+                    .encoder
+                    .encode_type_of_place_high(self.mir, *place)
+                    .with_span(span)?;
+                let expr = vir_high::Expression::addr_of_no_pos(
+                    encoded_place,
+                    vir_high::Type::pointer(ty),
+                );
+                state.substitute_value(&encoded_lhs, expr);
+            }
             mir::Rvalue::ThreadLocalRef(..)
-            | mir::Rvalue::AddressOf(..)
             | mir::Rvalue::ShallowInitBox(..)
             | mir::Rvalue::NullaryOp(..) => {
                 return Err(SpannedEncodingError::unsupported(
@@ -650,6 +661,50 @@ impl<'p, 'v: 'p, 'tcx: 'v> ExpressionBackwardInterpreter<'p, 'v, 'tcx> {
         }
 
         match proc_name {
+            "prusti_contracts::prusti_own" => {
+                assert_eq!(encoded_args.len(), 1);
+                let place = encoded_args[0].clone();
+                let position = place.position();
+                let encoded_rhs = vir_high::Expression::acc_predicate(
+                    vir_high::Predicate::owned_non_aliased(place, position),
+                    position,
+                );
+                subst_with(encoded_rhs)
+            }
+            "prusti_contracts::prusti_raw" => {
+                assert_eq!(encoded_args.len(), 2);
+                let address = encoded_args[0].clone();
+                let size = encoded_args[1].clone();
+                let position = address.position();
+                let encoded_rhs = vir_high::Expression::acc_predicate(
+                    vir_high::Predicate::memory_block_heap(address, size, position),
+                    position,
+                );
+                subst_with(encoded_rhs)
+            }
+            "prusti_contracts::prusti_raw_dealloc" => {
+                assert_eq!(encoded_args.len(), 2);
+                let address = encoded_args[0].clone();
+                let size = encoded_args[1].clone();
+                let position = address.position();
+                let encoded_rhs = vir_high::Expression::acc_predicate(
+                    vir_high::Predicate::memory_block_heap_drop(address, size, position),
+                    position,
+                );
+                subst_with(encoded_rhs)
+            }
+            "prusti_contracts::prusti_unpacking" => {
+                assert_eq!(encoded_args.len(), 2);
+                let place = encoded_args[0].clone();
+                let body = encoded_args[1].clone();
+                let position = place.position();
+                let encoded_rhs = vir_high::Expression::unfolding(
+                    vir_high::Predicate::owned_non_aliased(place, position),
+                    body,
+                    position,
+                );
+                subst_with(encoded_rhs)
+            }
             "prusti_contracts::old" => {
                 let argument = encoded_args.last().cloned().unwrap();
                 let position = argument.position();
@@ -735,6 +790,18 @@ impl<'p, 'v: 'p, 'tcx: 'v> ExpressionBackwardInterpreter<'p, 'v, 'tcx> {
                         )
                         .map(Some),
                 }
+            }
+            "std::ptr::mut_ptr::<impl *mut T>::is_null" => {
+                assert_eq!(encoded_args.len(), 1);
+                builtin((IsNull, vir_high::Type::Bool))
+            }
+            "std::mem::size_of" => {
+                assert_eq!(encoded_args.len(), 0);
+                builtin((Size, vir_high::Type::Int(vir_high::ty::Int::Usize)))
+            }
+            "std::mem::align_of" => {
+                assert_eq!(encoded_args.len(), 0);
+                builtin((Align, vir_high::Type::Int(vir_high::ty::Int::Usize)))
             }
 
             // Prusti-specific syntax

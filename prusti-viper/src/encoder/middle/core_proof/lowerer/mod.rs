@@ -216,6 +216,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> Lowerer<'p, 'v, 'tcx> {
         let mut methods = self.methods_state.destruct();
         let mut functions = self.functions_state.destruct();
         if procedure.check_mode == CheckMode::Specifications {
+            removed_functions.extend(
+                functions
+                    .iter()
+                    .filter(|function| function.kind == vir_low::FunctionKind::Snap)
+                    .map(|function| function.name.clone()),
+            );
             super::transformations::remove_predicates::remove_predicates(
                 &mut lowered_procedure,
                 &mut methods,

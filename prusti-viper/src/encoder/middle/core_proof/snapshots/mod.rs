@@ -14,8 +14,9 @@ pub(super) use self::{
     bytes::SnapshotBytesInterface,
     domains::SnapshotDomainsInterface,
     into_snapshot::{
-        IntoBuiltinMethodSnapshot, IntoProcedureBoolExpression, IntoProcedureFinalSnapshot,
-        IntoProcedureSnapshot, IntoPureBoolExpression, IntoPureSnapshot, IntoSnapshot,
+        IntoBuiltinMethodSnapshot, IntoProcedureAssertion, IntoProcedureBoolExpression,
+        IntoProcedureFinalSnapshot, IntoProcedureSnapshot, IntoPureBoolExpression,
+        IntoPureSnapshot, IntoSnapshot, IntoSnapshotLowerer, SelfFramingAssertionToSnapshot,
     },
     state::SnapshotsState,
     validity::{valid_call, valid_call2, SnapshotValidityInterface},

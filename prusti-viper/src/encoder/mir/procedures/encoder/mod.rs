@@ -18,6 +18,7 @@ use crate::encoder::{
         spans::SpanInterface,
         specifications::SpecificationsInterface,
         type_layouts::MirTypeLayoutsEncoderInterface,
+        types::MirTypeEncoderInterface,
     },
     mir_encoder::PRECONDITION_LABEL,
     Encoder,
@@ -57,6 +58,7 @@ use vir_crate::{
 };
 
 mod builtin_function_encoder;
+mod check_mode_converters;
 mod elaborate_drops;
 mod ghost;
 mod initialisation;
@@ -66,15 +68,23 @@ mod scc;
 pub mod specification_blocks;
 mod termination;
 
+#[derive(Debug)]
+pub(super) enum ProcedureEncodingKind {
+    Regular,
+    PostconditionFrameCheck,
+}
+
 pub(super) fn encode_procedure<'v, 'tcx: 'v>(
     encoder: &mut Encoder<'v, 'tcx>,
     def_id: DefId,
     check_mode: CheckMode,
+    encoding_kind: ProcedureEncodingKind,
 ) -> SpannedEncodingResult<vir_high::ProcedureDecl> {
     let procedure = Procedure::new(encoder.env(), def_id);
     let tcx = encoder.env().tcx();
     let (mir, lifetimes) = self::elaborate_drops::elaborate_drops(encoder, def_id, &procedure)?;
     let mir = &mir; // Mark body as immutable.
+    let is_unsafe_function = encoder.env().query.is_unsafe_function(def_id);
     let move_env = self::initialisation::create_move_data_param_env(tcx, mir, def_id);
     let init_data = InitializationData::new(tcx, mir, &move_env);
     let locals_without_explicit_allocation: BTreeSet<_> = mir.vars_and_temps_iter().collect();
@@ -95,6 +105,7 @@ pub(super) fn encode_procedure<'v, 'tcx: 'v>(
         encoder,
         def_id,
         check_mode,
+        is_unsafe_function,
         procedure: &procedure,
         mir,
         init_data,
@@ -118,6 +129,7 @@ pub(super) fn encode_procedure<'v, 'tcx: 'v>(
         reborrow_lifetimes_to_remove_for_block,
         current_basic_block,
         termination_variable: None,
+        encoding_kind,
     };
     procedure_encoder.encode()
 }
@@ -126,6 +138,8 @@ struct ProcedureEncoder<'p, 'v: 'p, 'tcx: 'v> {
     encoder: &'p mut Encoder<'v, 'tcx>,
     def_id: DefId,
     check_mode: CheckMode,
+    encoding_kind: ProcedureEncodingKind,
+    is_unsafe_function: bool,
     procedure: &'p Procedure<'tcx>,
     mir: &'p mir::Body<'tcx>,
     init_data: InitializationData<'p, 'tcx>,
@@ -164,24 +178,27 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
     fn encode(&mut self) -> SpannedEncodingResult<vir_high::ProcedureDecl> {
         self.pure_sanity_checks()?;
         let name = format!(
-            "{}${}",
+            "{}${}${:?}",
             self.encoder.encode_item_name(self.def_id),
-            self.check_mode
+            self.check_mode,
+            self.encoding_kind,
         );
         let (allocate_parameters, deallocate_parameters) = self.encode_parameters()?;
         let (allocate_returns, deallocate_returns) = self.encode_returns()?;
         self.lifetime_token_permission =
             Some(self.fresh_ghost_variable("lifetime_token_perm_amount", vir_high::Type::MPerm));
-        let (assume_preconditions, assert_postconditions) = match self.check_mode {
-            CheckMode::CoreProof => {
-                // Unsafe functions will come with CheckMode::Both because they
-                // are allowed to have preconditions.
-                (Vec::new(), Vec::new())
-            }
-            CheckMode::Both | CheckMode::Specifications => {
-                self.encode_functional_specifications()?
-            }
-        };
+        let (assume_preconditions, assert_postconditions) =
+            self.encode_functional_specifications()?;
+        // match self.check_mode {
+        //     CheckMode::CoreProof => {
+        //         // Unsafe functions will come with CheckMode::Both because they
+        //         // are allowed to have preconditions.
+        //         (Vec::new(), Vec::new())
+        //     }
+        //     CheckMode::Both | CheckMode::Specifications => {
+        //         self.encode_functional_specifications()?
+        //     }
+        // };
         let (assume_lifetime_preconditions, assert_lifetime_postconditions) =
             self.encode_lifetime_specifications()?;
         let termination_initialization = self.encode_termination_initialization()?;
@@ -203,7 +220,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
         post_statements.extend(assert_lifetime_postconditions);
         let mut procedure_builder =
             ProcedureBuilder::new(name, self.check_mode, pre_statements, post_statements);
-        self.encode_body(&mut procedure_builder)?;
+        match self.encoding_kind {
+            ProcedureEncodingKind::Regular => self.encode_body(&mut procedure_builder)?,
+            ProcedureEncodingKind::PostconditionFrameCheck => {
+                self.encode_postcondition_frame_check(&mut procedure_builder)?;
+            }
+        }
         self.encode_implicit_allocations(&mut procedure_builder)?;
         Ok(procedure_builder.build())
     }
@@ -256,7 +278,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
         )];
         for mir_arg in self.mir.args_iter() {
             let parameter = self.encode_local(mir_arg)?;
-            let alloc_statement = vir_high::Statement::inhale_no_pos(
+            let alloc_statement = vir_high::Statement::inhale_predicate_no_pos(
                 vir_high::Predicate::owned_non_aliased_no_pos(parameter.clone().into()),
             );
             allocation.push(self.encoder.set_surrounding_error_context_for_statement(
@@ -266,7 +288,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             )?);
             let mir_type = self.encoder.get_local_type(self.mir, mir_arg)?;
             let size = self.encoder.encode_type_size_expression(mir_type)?;
-            let dealloc_statement = vir_high::Statement::exhale_no_pos(
+            let dealloc_statement = vir_high::Statement::exhale_predicate_no_pos(
                 vir_high::Predicate::memory_block_stack_no_pos(parameter.clone().into(), size),
             );
             deallocation.push(self.encoder.set_surrounding_error_context_for_statement(
@@ -285,17 +307,16 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
         let mir_type = self.encoder.get_local_type(self.mir, mir::RETURN_PLACE)?;
         let size = self.encoder.encode_type_size_expression(mir_type)?;
         let alloc_statement = self.encoder.set_surrounding_error_context_for_statement(
-            vir_high::Statement::inhale_no_pos(vir_high::Predicate::memory_block_stack_no_pos(
-                return_local.clone().into(),
-                size,
-            )),
+            vir_high::Statement::inhale_predicate_no_pos(
+                vir_high::Predicate::memory_block_stack_no_pos(return_local.clone().into(), size),
+            ),
             return_local.position,
             ErrorCtxt::UnexpectedStorageLive,
         )?;
         let dealloc_statement = self.encoder.set_surrounding_error_context_for_statement(
-            vir_high::Statement::exhale_no_pos(vir_high::Predicate::owned_non_aliased_no_pos(
-                return_local.clone().into(),
-            )),
+            vir_high::Statement::exhale_predicate_no_pos(
+                vir_high::Predicate::owned_non_aliased_no_pos(return_local.clone().into()),
+            ),
             return_local.position,
             ErrorCtxt::UnexpectedStorageDead,
         )?;
@@ -384,24 +405,35 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             "Assume functional preconditions.".to_string(),
         )];
         let mut arguments: Vec<vir_high::Expression> = Vec::new();
+        let mut framing_variables = Vec::new();
         for local in self.mir.args_iter() {
-            arguments.push(self.encode_local(local)?.into());
+            let parameter = self.encode_local(local)?;
+            framing_variables.push(parameter.variable.clone());
+            arguments.push(parameter.into());
         }
         for expression in
             self.encode_precondition_expressions(&procedure_contract, substs, &arguments)?
         {
-            let assume_statement = self.encoder.set_statement_error_ctxt(
-                vir_high::Statement::assume_no_pos(expression),
-                mir_span,
-                ErrorCtxt::UnexpectedAssumeMethodPrecondition,
-                self.def_id,
-            )?;
-            preconditions.push(assume_statement);
+            if let Some(expression) = self.convert_expression_to_check_mode(
+                expression,
+                !self.is_unsafe_function,
+                &framing_variables,
+            )? {
+                let inhale_statement = self.encoder.set_statement_error_ctxt(
+                    vir_high::Statement::inhale_expression_no_pos(expression),
+                    mir_span,
+                    ErrorCtxt::UnexpectedAssumeMethodPrecondition,
+                    self.def_id,
+                )?;
+                preconditions.push(inhale_statement);
+            }
         }
         let mut postconditions = vec![vir_high::Statement::comment(
             "Assert functional postconditions.".to_string(),
         )];
-        let result: vir_high::Expression = self.encode_local(mir::RETURN_PLACE)?.into();
+        let result_variable = self.encode_local(mir::RETURN_PLACE)?;
+        framing_variables.push(result_variable.variable.clone());
+        let result: vir_high::Expression = result_variable.into();
         for expression in self.encode_postcondition_expressions(
             &procedure_contract,
             substs,
@@ -409,13 +441,19 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             &result,
             PRECONDITION_LABEL,
         )? {
-            let assert_statement = self.encoder.set_statement_error_ctxt(
-                vir_high::Statement::assert_no_pos(expression),
-                mir_span,
-                ErrorCtxt::AssertMethodPostcondition,
-                self.def_id,
-            )?;
-            postconditions.push(assert_statement);
+            if let Some(expression) = self.convert_expression_to_check_mode(
+                expression,
+                !self.is_unsafe_function,
+                &framing_variables,
+            )? {
+                let exhale_statement = self.encoder.set_statement_error_ctxt(
+                    vir_high::Statement::exhale_expression_no_pos(expression),
+                    mir_span,
+                    ErrorCtxt::AssertMethodPostcondition,
+                    self.def_id,
+                )?;
+                postconditions.push(exhale_statement);
+            }
         }
         Ok((preconditions, postconditions))
     }
@@ -438,14 +476,14 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 );
                 procedure_builder.add_alloc_statement(
                     self.encoder.set_surrounding_error_context_for_statement(
-                        vir_high::Statement::inhale_no_pos(predicate.clone()),
+                        vir_high::Statement::inhale_predicate_no_pos(predicate.clone()),
                         encoded_local.position,
                         ErrorCtxt::UnexpectedStorageLive,
                     )?,
                 );
                 procedure_builder.add_dealloc_statement(
                     self.encoder.set_surrounding_error_context_for_statement(
-                        vir_high::Statement::exhale_no_pos(predicate.clone()),
+                        vir_high::Statement::exhale_predicate_no_pos(predicate.clone()),
                         encoded_local.position,
                         ErrorCtxt::UnexpectedStorageLive,
                     )?,
@@ -487,6 +525,131 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             "not consumed loop invariant: {:?}",
             self.loop_invariant_encoding.keys()
         );
+        Ok(())
+    }
+
+    fn encode_postcondition_frame_check(
+        &mut self,
+        procedure_builder: &mut ProcedureBuilder,
+    ) -> SpannedEncodingResult<()> {
+        // FIXME: code duplication with encode_function_call.
+        let entry_label = vir_high::BasicBlockId::new("label_entry".to_string());
+        let mut block_builder = procedure_builder.create_basic_block_builder(entry_label.clone());
+        block_builder.set_successor_exit(SuccessorExitKind::Return);
+        let location = mir::Location {
+            block: 0usize.into(),
+            statement_index: 0,
+        };
+        let span = self.mir.span;
+        let called_def_id = self.def_id;
+        let call_substs = self.encoder.env().query.identity_substs(called_def_id);
+        let args: Vec<_> = self
+            .mir
+            .args_iter()
+            .map(|arg| mir::Operand::Move(arg.into()))
+            .collect();
+        let target_place_local = mir::RETURN_PLACE;
+        let destination: mir::Place = target_place_local.into();
+        // let target = Some(1usize.into());
+        // let cleanup = Some(1usize.into());
+
+        let is_unsafe = self.encoder.env().query.is_unsafe_function(called_def_id);
+
+        // self.encode_function_call(&mut block_builder, location, span, called_def_id, call_substs, &args, destination, &target, &cleanup)?;
+
+        let old_label = self.fresh_old_label();
+        block_builder.add_statement(self.encoder.set_statement_error_ctxt(
+            vir_high::Statement::old_label_no_pos(old_label.clone()),
+            span,
+            ErrorCtxt::ProcedureCall,
+            self.def_id,
+        )?);
+
+        let mut arguments = Vec::new();
+        for arg in &args {
+            arguments.push(
+                self.encoder
+                    .encode_operand_high(self.mir, arg, span)
+                    .with_span(span)?,
+            );
+            let encoded_arg = self.encode_statement_operand(location, arg)?;
+            let statement = vir_high::Statement::consume_no_pos(encoded_arg);
+            block_builder.add_statement(self.encoder.set_statement_error_ctxt(
+                statement,
+                span,
+                ErrorCtxt::ProcedureCall,
+                self.def_id,
+            )?);
+        }
+
+        let procedure_contract = self
+            .encoder
+            .get_mir_procedure_contract_for_call(self.def_id, called_def_id, call_substs)
+            .with_span(span)?;
+
+        let precondition_expressions =
+            self.encode_precondition_expressions(&procedure_contract, call_substs, &arguments)?;
+        for expression in precondition_expressions {
+            if let Some(expression) =
+                self.convert_expression_to_check_mode_call_site(expression, is_unsafe)?
+            {
+                let exhale_statement = self.encoder.set_statement_error_ctxt(
+                    vir_high::Statement::exhale_expression_no_pos(expression),
+                    span,
+                    ErrorCtxt::ExhaleMethodPrecondition,
+                    self.def_id,
+                )?;
+                block_builder.add_statement(exhale_statement);
+            }
+        }
+
+        let position = self.register_error(location, ErrorCtxt::ProcedureCall);
+        let encoded_target_place = self
+            .encode_place(destination, None)?
+            .set_default_position(position);
+        let postcondition_expressions = self.encode_postcondition_expressions(
+            &procedure_contract,
+            call_substs,
+            arguments.clone(),
+            &encoded_target_place,
+            &old_label,
+        )?;
+        let size = self.encoder.encode_type_size_expression(
+            self.encoder.get_local_type(self.mir, target_place_local)?,
+        )?;
+        let target_memory_block =
+            vir_high::Predicate::memory_block_stack_no_pos(encoded_target_place.clone(), size);
+        block_builder.add_statement(self.encoder.set_statement_error_ctxt(
+            vir_high::Statement::exhale_predicate_no_pos(target_memory_block),
+            span,
+            ErrorCtxt::ProcedureCall,
+            self.def_id,
+        )?);
+        let statement = vir_high::Statement::inhale_predicate_no_pos(
+            vir_high::Predicate::owned_non_aliased_no_pos(encoded_target_place.clone()),
+        );
+        block_builder.add_statement(self.encoder.set_statement_error_ctxt(
+            statement,
+            span,
+            ErrorCtxt::ProcedureCall,
+            self.def_id,
+        )?);
+        for expression in postcondition_expressions {
+            if let Some(expression) =
+                self.convert_expression_to_check_mode_call_site(expression, is_unsafe)?
+            {
+                let inhale_statement = self.encoder.set_statement_error_ctxt(
+                    vir_high::Statement::inhale_expression_no_pos(expression),
+                    span,
+                    ErrorCtxt::MethodPostconditionFraming,
+                    self.def_id,
+                )?;
+                block_builder.add_statement(inhale_statement);
+            }
+        }
+
+        block_builder.build();
+        procedure_builder.set_entry(entry_label);
         Ok(())
     }
 
@@ -598,7 +761,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 block_builder.add_statement(self.set_statement_error(
                     location,
                     ErrorCtxt::UnexpectedStorageLive,
-                    vir_high::Statement::inhale_no_pos(memory_block),
+                    vir_high::Statement::inhale_predicate_no_pos(memory_block),
                 )?);
                 let memory_block_drop = self
                     .encoder
@@ -606,7 +769,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 block_builder.add_statement(self.set_statement_error(
                     location,
                     ErrorCtxt::UnexpectedStorageLive,
-                    vir_high::Statement::inhale_no_pos(memory_block_drop),
+                    vir_high::Statement::inhale_predicate_no_pos(memory_block_drop),
                 )?);
             }
             mir::StatementKind::StorageDead(local) => {
@@ -617,7 +780,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 block_builder.add_statement(self.set_statement_error(
                     location,
                     ErrorCtxt::UnexpectedStorageDead,
-                    vir_high::Statement::exhale_no_pos(memory_block),
+                    vir_high::Statement::exhale_predicate_no_pos(memory_block),
                 )?);
                 let memory_block_drop = self
                     .encoder
@@ -625,7 +788,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 block_builder.add_statement(self.set_statement_error(
                     location,
                     ErrorCtxt::UnexpectedStorageDead,
-                    vir_high::Statement::exhale_no_pos(memory_block_drop),
+                    vir_high::Statement::exhale_predicate_no_pos(memory_block_drop),
                 )?);
             }
             mir::StatementKind::Assign(box (target, source)) => {
@@ -738,7 +901,20 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                     vir_high::Statement::assign_no_pos(encoded_target, encoded_rvalue),
                 )?);
             }
-            // mir::Rvalue::Cast(CastKind, Operand<'tcx>, Ty<'tcx>),
+            mir::Rvalue::Cast(_kind, operand, ty) => {
+                let encoded_operand = self.encode_statement_operand(location, operand)?;
+                let ty = self.encoder.encode_type_high(*ty)?;
+                let encoded_rvalue = vir_high::Rvalue::cast(encoded_operand, ty);
+                block_builder.add_statement(self.set_statement_error(
+                    location,
+                    ErrorCtxt::Assign,
+                    vir_high::Statement::assign_no_pos(encoded_target, encoded_rvalue),
+                )?);
+                // self.encode_assign_cast(block_builder, location, encoded_target, *kind, operand, *ty)?;
+                // TODO: For raw pointers do nothing because we care only about
+                // the type of the target.
+                // unimplemented!("kind={kind:?} operand={operand:?} ty={ty:?}");
+            }
             mir::Rvalue::BinaryOp(op, box (left, right)) => {
                 let encoded_left = self.encode_statement_operand(location, left)?;
                 let encoded_right = self.encode_statement_operand(location, right)?;
@@ -912,37 +1088,38 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
         permission: Option<vir_high::VariableDecl>,
     ) -> SpannedEncodingResult<()> {
         if let Some(base) = deref_base {
-            if let vir_high::ty::Type::Reference(vir_high::ty::Reference {
-                lifetime,
-                uniqueness,
-                ..
-            }) = base.get_type()
-            {
-                if *uniqueness == vir_high::ty::Uniqueness::Unique {
-                    block_builder.add_statement(self.set_statement_error(
-                        location,
-                        ErrorCtxt::CloseMutRef,
-                        vir_high::Statement::close_mut_ref_no_pos(
-                            lifetime.clone(),
-                            self.lifetime_token_fractional_permission(self.lifetime_count),
-                            place,
-                        ),
-                    )?);
-                } else {
-                    block_builder.add_statement(self.set_statement_error(
-                        location,
-                        ErrorCtxt::CloseFracRef,
-                        vir_high::Statement::close_frac_ref_no_pos(
-                            lifetime.clone(),
-                            self.lifetime_token_fractional_permission(self.lifetime_count),
-                            place,
-                            permission.unwrap(),
-                        ),
-                    )?);
+            match base.get_type() {
+                vir_high::ty::Type::Reference(vir_high::ty::Reference {
+                    lifetime,
+                    uniqueness,
+                    ..
+                }) => {
+                    if *uniqueness == vir_high::ty::Uniqueness::Unique {
+                        block_builder.add_statement(self.set_statement_error(
+                            location,
+                            ErrorCtxt::CloseMutRef,
+                            vir_high::Statement::close_mut_ref_no_pos(
+                                lifetime.clone(),
+                                self.lifetime_token_fractional_permission(self.lifetime_count),
+                                place,
+                            ),
+                        )?);
+                    } else {
+                        block_builder.add_statement(self.set_statement_error(
+                            location,
+                            ErrorCtxt::CloseFracRef,
+                            vir_high::Statement::close_frac_ref_no_pos(
+                                lifetime.clone(),
+                                self.lifetime_token_fractional_permission(self.lifetime_count),
+                                place,
+                                permission.unwrap(),
+                            ),
+                        )?);
+                    }
                 }
-            } else {
-                unreachable!();
-            };
+                vir_high::ty::Type::Pointer(_) => {}
+                _ => unreachable!(),
+            }
         }
         Ok(())
     }
@@ -956,39 +1133,40 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
     ) -> SpannedEncodingResult<Option<vir_high::VariableDecl>> {
         let mut variable = None;
         if let Some(base) = deref_base {
-            if let vir_high::ty::Type::Reference(vir_high::ty::Reference {
-                lifetime,
-                uniqueness,
-                ..
-            }) = base.get_type()
-            {
-                if *uniqueness == vir_high::ty::Uniqueness::Unique {
-                    block_builder.add_statement(self.set_statement_error(
-                        location,
-                        ErrorCtxt::OpenMutRef,
-                        vir_high::Statement::open_mut_ref_no_pos(
-                            lifetime.clone(),
-                            self.lifetime_token_fractional_permission(self.lifetime_count),
-                            place,
-                        ),
-                    )?);
-                } else {
-                    let permission =
-                        self.fresh_ghost_variable("tmp_frac_ref_perm", vir_high::Type::MPerm);
-                    variable = Some(permission.clone());
-                    block_builder.add_statement(self.set_statement_error(
-                        location,
-                        ErrorCtxt::OpenFracRef,
-                        vir_high::Statement::open_frac_ref_no_pos(
-                            lifetime.clone(),
-                            permission,
-                            self.lifetime_token_fractional_permission(self.lifetime_count),
-                            place,
-                        ),
-                    )?);
+            match base.get_type() {
+                vir_high::ty::Type::Reference(vir_high::ty::Reference {
+                    lifetime,
+                    uniqueness,
+                    ..
+                }) => {
+                    if *uniqueness == vir_high::ty::Uniqueness::Unique {
+                        block_builder.add_statement(self.set_statement_error(
+                            location,
+                            ErrorCtxt::OpenMutRef,
+                            vir_high::Statement::open_mut_ref_no_pos(
+                                lifetime.clone(),
+                                self.lifetime_token_fractional_permission(self.lifetime_count),
+                                place,
+                            ),
+                        )?);
+                    } else {
+                        let permission =
+                            self.fresh_ghost_variable("tmp_frac_ref_perm", vir_high::Type::MPerm);
+                        variable = Some(permission.clone());
+                        block_builder.add_statement(self.set_statement_error(
+                            location,
+                            ErrorCtxt::OpenFracRef,
+                            vir_high::Statement::open_frac_ref_no_pos(
+                                lifetime.clone(),
+                                permission,
+                                self.lifetime_token_fractional_permission(self.lifetime_count),
+                                place,
+                            ),
+                        )?);
+                    }
                 }
-            } else {
-                unreachable!("place: {} deref_base: {:?}", place, deref_base);
+                vir_high::ty::Type::Pointer(_) => {}
+                _ => unreachable!("place: {} deref_base: {:?}", place, deref_base),
             }
         };
         Ok(variable)
@@ -1087,6 +1265,19 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
 
         Ok(())
     }
+
+    // fn encode_assign_cast(
+    //     &mut self,
+    //     block_builder: &mut BasicBlockBuilder,
+    //     location: mir::Location,
+    //     encoded_target: vir_crate::high::Expression,
+    //     kind: mir::CastKind,
+    //     operand: &mir::Operand<'tcx>,
+    //     ty: ty::Ty<'tcx>,
+    // ) -> SpannedEncodingResult<()> {
+    //     let span = self.encoder.get_span_of_location(self.mir, location);
+    //     match ty {}
+    // }
 
     fn encode_statement_operand(
         &mut self,
@@ -1493,6 +1684,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 .env()
                 .query
                 .resolve_method_call(self.def_id, called_def_id, call_substs);
+        let is_unsafe = self.encoder.env().query.is_unsafe_function(called_def_id);
 
         // find static lifetime to exhale
         let mut lifetimes_to_exhale_inhale: Vec<String> = Vec::new();
@@ -1614,17 +1806,20 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             )?;
         }
 
-        for expression in
-            self.encode_precondition_expressions(&procedure_contract, call_substs, &arguments)?
-        {
-            let assert_statement = self.encoder.set_statement_error_ctxt(
-                vir_high::Statement::assert_no_pos(expression),
-                span,
-                ErrorCtxt::ExhaleMethodPrecondition,
-                self.def_id,
-            )?;
-            if self.check_mode != CheckMode::CoreProof {
-                block_builder.add_statement(assert_statement);
+        let precondition_expressions =
+            self.encode_precondition_expressions(&procedure_contract, call_substs, &arguments)?;
+        let has_no_precondition = precondition_expressions.is_empty();
+        for expression in precondition_expressions {
+            if let Some(expression) =
+                self.convert_expression_to_check_mode_call_site(expression, is_unsafe)?
+            {
+                let exhale_statement = self.encoder.set_statement_error_ctxt(
+                    vir_high::Statement::exhale_expression_no_pos(expression),
+                    span,
+                    ErrorCtxt::ExhaleMethodPrecondition,
+                    self.def_id,
+                )?;
+                block_builder.add_statement(exhale_statement);
             }
         }
 
@@ -1656,7 +1851,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                     size,
                 );
                 block_builder.add_statement(self.encoder.set_statement_error_ctxt(
-                    vir_high::Statement::exhale_no_pos(target_memory_block.clone()),
+                    vir_high::Statement::exhale_predicate_no_pos(target_memory_block.clone()),
                     span,
                     ErrorCtxt::ProcedureCall,
                     self.def_id,
@@ -1667,7 +1862,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 let mut post_call_block_builder =
                     block_builder.create_basic_block_builder(fresh_destination_label.clone());
                 post_call_block_builder.set_successor_jump(vir_high::Successor::Goto(target_label));
-                let statement = vir_high::Statement::inhale_no_pos(
+                let statement = vir_high::Statement::inhale_predicate_no_pos(
                     vir_high::Predicate::owned_non_aliased_no_pos(encoded_target_place.clone()),
                 );
                 post_call_block_builder.add_statement(self.encoder.set_statement_error_ctxt(
@@ -1698,14 +1893,20 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 self.encode_lft_for_block(*target_block, location, &mut post_call_block_builder)?;
 
                 for expression in postcondition_expressions {
-                    let assume_statement = self.encoder.set_statement_error_ctxt(
-                        vir_high::Statement::assume_no_pos(expression),
-                        span,
-                        ErrorCtxt::UnexpectedAssumeMethodPostcondition,
-                        self.def_id,
-                    )?;
-                    if self.check_mode != CheckMode::CoreProof {
-                        post_call_block_builder.add_statement(assume_statement);
+                    if let Some(expression) = self.convert_expression_to_check_mode_call_site(
+                        expression,
+                        is_unsafe ||
+                        // If we have no precondition, then we can soundly
+                        // allways include the function postcondition.
+                        has_no_precondition,
+                    )? {
+                        let inhale_statement = self.encoder.set_statement_error_ctxt(
+                            vir_high::Statement::inhale_expression_no_pos(expression),
+                            span,
+                            ErrorCtxt::UnexpectedAssumeMethodPostcondition,
+                            self.def_id,
+                        )?;
+                        post_call_block_builder.add_statement(inhale_statement);
                     }
                 }
                 if self.encoder.is_pure(called_def_id, Some(call_substs))
@@ -1743,9 +1944,42 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                         ErrorCtxt::UnexpectedAssumeMethodPostcondition,
                         self.def_id,
                     )?;
-                    if self.check_mode != CheckMode::CoreProof {
+                    if self.check_mode != CheckMode::CoreProof ||
+                        // If we have no precondition, then we can soundly
+                        // allways include the function postcondition.
+                        has_no_precondition
+                    {
                         post_call_block_builder.add_statement(assume_statement);
                     }
+                } else {
+                    // // FIXME: We do this because extern specs do not support primitive
+                    // // types.
+                    // let func_name = self.encoder.env().name.get_unique_item_name(called_def_id);
+                    // if func_name.starts_with("std::ptr::mut_ptr::<impl *mut T>::is_null")
+                    // || func_name.starts_with("core::std::ptr::mut_ptr::<impl *mut T>::is_null") {
+                    //     let type_arguments = self
+                    //     .encoder
+                    //     .encode_generic_arguments_high(called_def_id, call_substs)
+                    //     .with_span(span)?;
+                    //     let expression = vir_high::Expression::equals(
+                    //         encoded_target_place,
+                    //         vir_high::Expression::builtin_func_app_no_pos(
+                    //             vir_high::BuiltinFunc::IsNull,
+                    //             type_arguments,
+                    //             arguments,
+                    //             vir_high::Type::Bool,
+                    //         ),
+                    //     );
+                    //     let assume_statement = self.encoder.set_statement_error_ctxt(
+                    //         vir_high::Statement::assume_no_pos(expression),
+                    //         span,
+                    //         ErrorCtxt::UnexpectedAssumeMethodPostcondition,
+                    //         self.def_id,
+                    //     )?;
+                    //     if self.check_mode != CheckMode::CoreProof {
+                    //         post_call_block_builder.add_statement(assume_statement);
+                    //     }
+                    // }
                 }
                 post_call_block_builder.build();
 
@@ -1757,7 +1991,8 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                     cleanup_block_builder
                         .set_successor_jump(vir_high::Successor::Goto(encoded_cleanup_block));
 
-                    let statement = vir_high::Statement::inhale_no_pos(target_memory_block);
+                    let statement =
+                        vir_high::Statement::inhale_predicate_no_pos(target_memory_block);
                     cleanup_block_builder.add_statement(self.encoder.set_statement_error_ctxt(
                         statement,
                         span,
@@ -2104,10 +2339,15 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 if let ty::TyKind::FnDef(def_id, _substs) = literal.ty().kind() {
                     let full_called_function_name =
                         self.encoder.env().name.get_absolute_item_name(*def_id);
-                    match full_called_function_name.as_ref() {
-                        "prusti_contracts::prusti_set_union_active_field" => {
-                            assert_eq!(args.len(), 1);
-                            let argument_place = if let mir::Operand::Move(place) = args[0] {
+                    fn extract_places<'p, 'v: 'p, 'tcx: 'v>(
+                        args: &[mir::Operand<'tcx>],
+                        block: &mir::BasicBlockData<'tcx>,
+                        encoder: &mut ProcedureEncoder<'p, 'v, 'tcx>,
+                    ) -> SpannedEncodingResult<Vec<vir_high::Expression>> {
+                        // assert_eq!(args.len(), 1);
+                        let mut encoded_places = Vec::new();
+                        for arg in args {
+                            let argument_place = if let mir::Operand::Move(place) = arg {
                                 place
                             } else {
                                 unreachable!()
@@ -2115,15 +2355,15 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                             // Find the place whose address was stored in the argument by
                             // iterating backwards through statements.
                             let mut statement_index = block.statements.len() - 1;
-                            let union_variant_place = loop {
+                            let place = loop {
                                 if let Some(statement) = block.statements.get(statement_index) {
                                     if let mir::StatementKind::Assign(box (
                                         target_place,
-                                        mir::Rvalue::AddressOf(_, union_variant_place),
+                                        mir::Rvalue::AddressOf(_, place),
                                     )) = &statement.kind
                                     {
-                                        if *target_place == argument_place {
-                                            break union_variant_place;
+                                        if target_place == argument_place {
+                                            break place;
                                         }
                                     }
                                     statement_index -= 1;
@@ -2131,14 +2371,133 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                                     unreachable!();
                                 }
                             };
-                            let encoded_variant_place =
-                                self.encode_place(*union_variant_place, None)?;
+                            encoded_places.push(encoder.encode_place(*place, None)?);
+                        }
+                        Ok(encoded_places)
+                    }
+                    fn extract_place<'p, 'v: 'p, 'tcx: 'v>(
+                        args: &[mir::Operand<'tcx>],
+                        block: &mir::BasicBlockData<'tcx>,
+                        encoder: &mut ProcedureEncoder<'p, 'v, 'tcx>,
+                    ) -> SpannedEncodingResult<vir_high::Expression> {
+                        assert_eq!(args.len(), 1);
+                        Ok(extract_places(args, block, encoder)?.pop().unwrap())
+                    }
+                    match full_called_function_name.as_ref() {
+                        "prusti_contracts::prusti_set_union_active_field" => {
+                            assert_eq!(args.len(), 1);
+                            // assert_eq!(args.len(), 1);
+                            // let argument_place = if let mir::Operand::Move(place) = args[0] {
+                            //     place
+                            // } else {
+                            //     unreachable!()
+                            // };
+                            // // Find the place whose address was stored in the argument by
+                            // // iterating backwards through statements.
+                            // let mut statement_index = block.statements.len() - 1;
+                            // let union_variant_place = loop {
+                            //     if let Some(statement) = block.statements.get(statement_index) {
+                            //         if let mir::StatementKind::Assign(box (
+                            //             target_place,
+                            //             mir::Rvalue::AddressOf(_, union_variant_place),
+                            //         )) = &statement.kind
+                            //         {
+                            //             if *target_place == argument_place {
+                            //                 break union_variant_place;
+                            //             }
+                            //         }
+                            //         statement_index -= 1;
+                            //     } else {
+                            //         unreachable!();
+                            //     }
+                            // };
+                            // let encoded_variant_place =
+                            //     self.encode_place(*union_variant_place, None)?;
+                            let encoded_variant_place = extract_place(args, block, self)?;
                             let statement = self.encoder.set_statement_error_ctxt(
                                 vir_high::Statement::set_union_variant_no_pos(
                                     encoded_variant_place,
                                 ),
                                 span,
                                 ErrorCtxt::SetEnumVariant,
+                                self.def_id,
+                            )?;
+                            statement.check_no_default_position();
+                            encoded_statements.push(statement);
+                            Ok(true)
+                        }
+                        "prusti_contracts::prusti_pack_place" => {
+                            let encoded_place = extract_place(args, block, self)?;
+                            let statement = self.encoder.set_statement_error_ctxt(
+                                vir_high::Statement::pack_no_pos(encoded_place),
+                                span,
+                                ErrorCtxt::Pack,
+                                self.def_id,
+                            )?;
+                            statement.check_no_default_position();
+                            encoded_statements.push(statement);
+                            Ok(true)
+                        }
+                        "prusti_contracts::prusti_unpack_place" => {
+                            let encoded_place = extract_place(args, block, self)?;
+                            let statement = self.encoder.set_statement_error_ctxt(
+                                vir_high::Statement::unpack_no_pos(encoded_place),
+                                span,
+                                ErrorCtxt::Unpack,
+                                self.def_id,
+                            )?;
+                            statement.check_no_default_position();
+                            encoded_statements.push(statement);
+                            Ok(true)
+                        }
+                        "prusti_contracts::prusti_join_place" => {
+                            let encoded_place = extract_place(args, block, self)?;
+                            let statement = self.encoder.set_statement_error_ctxt(
+                                vir_high::Statement::join_no_pos(encoded_place),
+                                span,
+                                ErrorCtxt::Pack,
+                                self.def_id,
+                            )?;
+                            statement.check_no_default_position();
+                            encoded_statements.push(statement);
+                            Ok(true)
+                        }
+                        "prusti_contracts::prusti_split_place" => {
+                            let encoded_place = extract_place(args, block, self)?;
+                            let statement = self.encoder.set_statement_error_ctxt(
+                                vir_high::Statement::split_no_pos(encoded_place),
+                                span,
+                                ErrorCtxt::Unpack,
+                                self.def_id,
+                            )?;
+                            statement.check_no_default_position();
+                            encoded_statements.push(statement);
+                            Ok(true)
+                        }
+                        "prusti_contracts::prusti_forget_initialization" => {
+                            let encoded_place = extract_place(args, block, self)?;
+                            let statement = self.encoder.set_statement_error_ctxt(
+                                vir_high::Statement::forget_initialization_no_pos(encoded_place),
+                                span,
+                                ErrorCtxt::ForgetInitialization,
+                                self.def_id,
+                            )?;
+                            statement.check_no_default_position();
+                            encoded_statements.push(statement);
+                            Ok(true)
+                        }
+                        "prusti_contracts::prusti_restore_place" => {
+                            assert_eq!(args.len(), 2);
+                            let mut encoded_places = extract_places(args, block, self)?;
+                            let restored_place = encoded_places.pop().unwrap();
+                            let borrowing_place = encoded_places.pop().unwrap();
+                            let statement = self.encoder.set_statement_error_ctxt(
+                                vir_high::Statement::restore_raw_borrowed_no_pos(
+                                    borrowing_place,
+                                    restored_place,
+                                ),
+                                span,
+                                ErrorCtxt::RestoreRawBorrowed,
                                 self.def_id,
                             )?;
                             statement.check_no_default_position();
@@ -2153,5 +2512,16 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             }
             _ => unreachable!("block: {:?}", bb),
         }
+    }
+
+    fn is_pure(&self, def_id: DefId, substs: Option<SubstsRef<'tcx>>) -> bool {
+        self.encoder.is_pure(def_id, substs)
+        //  || {
+        //     // FIXME: We do this because extern specs do not support primitive
+        //     // types.
+        //     let func_name = self.encoder.env().name.get_unique_item_name(def_id);
+        //     func_name.starts_with("std::ptr::mut_ptr::<impl *mut T>::is_null")
+        //     || func_name.starts_with("core::std::ptr::mut_ptr::<impl *mut T>::is_null")
+        // }
     }
 }

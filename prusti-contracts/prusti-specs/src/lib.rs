@@ -691,7 +691,7 @@ pub fn trusted(attr: TokenStream, tokens: TokenStream) -> TokenStream {
     }
 }
 
-pub fn invariant(attr: TokenStream, tokens: TokenStream) -> TokenStream {
+pub fn invariant(attr: TokenStream, tokens: TokenStream, is_structural: bool) -> TokenStream {
     let mut rewriter = rewriter::AstRewriter::new();
     let spec_id = rewriter.generate_spec_id();
     let spec_id_str = spec_id.to_string();
@@ -699,19 +699,30 @@ pub fn invariant(attr: TokenStream, tokens: TokenStream) -> TokenStream {
     let item: syn::DeriveInput = handle_result!(syn::parse2(tokens));
     let item_span = item.span();
     let item_ident = item.ident.clone();
+    let item_name_structural = if is_structural {
+        "structural"
+    } else {
+        "non_structural"
+    };
     let item_name = syn::Ident::new(
-        &format!("prusti_invariant_item_{}_{}", item_ident, spec_id),
+        &format!("prusti_invariant_item_{}_{}_{}", item_name_structural, item_ident, spec_id),
         item_span,
     );
 
     let attr = handle_result!(parse_prusti(attr));
 
+    let is_structural_tokens = if is_structural {
+        quote_spanned!(item_span => #[prusti::type_invariant_structural])
+    } else {
+        quote_spanned!(item_span => #[prusti::type_invariant_non_structural])
+    };
     // TODO: move some of this to AstRewriter?
     // see AstRewriter::generate_spec_item_fn for explanation of syntax below
     let spec_item: syn::ItemFn = parse_quote_spanned! {item_span=>
         #[allow(unused_must_use, unused_parens, unused_variables, dead_code, non_snake_case)]
         #[prusti::spec_only]
         #[prusti::type_invariant_spec]
+        #is_structural_tokens
         #[prusti::spec_id = #spec_id_str]
         fn #item_name(self) -> bool {
             !!((#attr) : bool)
@@ -1075,5 +1086,73 @@ pub fn ghost(tokens: TokenStream) -> TokenStream {
             }
         }
         syn_errors
+    }
+}
+
+pub fn pack(tokens: TokenStream) -> TokenStream {
+    generate_place_function(tokens, quote!{prusti_pack_place})
+}
+
+pub fn unpack(tokens: TokenStream) -> TokenStream {
+    generate_place_function(tokens, quote!{prusti_unpack_place})
+}
+
+pub fn join(tokens: TokenStream) -> TokenStream {
+    generate_place_function(tokens, quote!{prusti_join_place})
+}
+
+pub fn split(tokens: TokenStream) -> TokenStream {
+    generate_place_function(tokens, quote!{prusti_split_place})
+}
+
+pub fn set_union_active_field(tokens: TokenStream) -> TokenStream {
+    generate_place_function(tokens, quote!{prusti_set_union_active_field})
+}
+
+pub fn forget_initialization(tokens: TokenStream) -> TokenStream {
+    generate_place_function(tokens, quote!{prusti_forget_initialization})
+}
+
+fn generate_place_function(tokens: TokenStream, function: TokenStream) -> TokenStream {
+    let callsite_span = Span::call_site();
+    quote_spanned! { callsite_span =>
+        #[allow(unused_must_use, unused_variables)]
+        #[prusti::specs_version = #SPECS_VERSION]
+        if false {
+            #[prusti::spec_only]
+            || -> bool { true };
+            unsafe { #function(std::ptr::addr_of!(#tokens)) };
+        }
+    }
+}
+
+pub fn restore(tokens: TokenStream) -> TokenStream {
+    let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+    let mut args = handle_result!(syn::parse::Parser::parse2(parser, tokens));
+    let restored_place = if let Some(restored_place) = args.pop() {
+        restored_place.into_value()
+    } else {
+        return syn::Error::new(
+            args.span(),
+            "`restore!` needs to contain two arguments `<borrowing place>` and `<place to restore>`"
+        ).to_compile_error();
+    };
+    let borrowing_place = if let Some(borrowing_place) = args.pop() {
+        borrowing_place.into_value()
+    } else {
+        return syn::Error::new(
+            args.span(),
+            "`restore!` needs to contain two arguments `<borrowing place>` and `<place to restore>`"
+        ).to_compile_error();
+    };
+    let callsite_span = Span::call_site();
+    quote_spanned! { callsite_span =>
+        #[allow(unused_must_use, unused_variables)]
+        #[prusti::specs_version = #SPECS_VERSION]
+        if false {
+            #[prusti::spec_only]
+            || -> bool { true };
+            unsafe { prusti_restore_place(std::ptr::addr_of!(#borrowing_place), std::ptr::addr_of!(#restored_place)) };
+        }
     }
 }

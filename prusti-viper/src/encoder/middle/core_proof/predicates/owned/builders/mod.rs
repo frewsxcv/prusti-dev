@@ -4,9 +4,16 @@ mod owned_non_aliased;
 mod unique_ref;
 
 pub(super) use self::{
-    common::predicate_decl::PredicateDeclBuilderMethods, frac_ref::predicate_decl::FracRefBuilder,
-    owned_non_aliased::predicate_decl::OwnedNonAliasedBuilder,
-    unique_ref::predicate_decl::UniqueRefBuilder,
+    common::predicate_decl::PredicateDeclBuilderMethods,
+    frac_ref::predicate_decl::FracRefBuilder,
+    owned_non_aliased::{
+        function_decl::OwnedNonAliasedSnapFunctionBuilder,
+        function_use::OwnedNonAliasedSnapCallBuilder, predicate_decl::OwnedNonAliasedBuilder,
+    },
+    unique_ref::{
+        function_decl::UniqueRefSnapFunctionBuilder, function_use::UniqueRefSnapCallBuilder,
+        predicate_decl::UniqueRefBuilder,
+    },
 };
 pub(in super::super::super) use self::{
     frac_ref::predicate_use::FracRefUseBuilder,

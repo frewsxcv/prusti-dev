@@ -102,6 +102,12 @@ impl DefSpecificationMap {
             if let Some(invariants) = spec.invariant.extract_with_selective_replacement() {
                 specs.extend(invariants);
             }
+            if let Some(invariants) = spec
+                .structural_invariant
+                .extract_with_selective_replacement()
+            {
+                specs.extend(invariants);
+            }
         }
         (specs, pure_fns, predicates)
     }
@@ -264,6 +270,7 @@ pub struct TypeSpecification {
     // `extern_spec` for type invs is supported it could differ.
     pub source: DefId,
     pub invariant: SpecificationItem<Vec<DefId>>,
+    pub structural_invariant: SpecificationItem<Vec<DefId>>,
     pub trusted: SpecificationItem<bool>,
     pub model: Option<(String, LocalDefId)>,
     pub counterexample_print: Vec<(Option<String>, LocalDefId)>,
@@ -274,6 +281,7 @@ impl TypeSpecification {
         TypeSpecification {
             source,
             invariant: SpecificationItem::Empty,
+            structural_invariant: SpecificationItem::Empty,
             trusted: SpecificationItem::Inherent(false),
             model: None,
             counterexample_print: vec![],

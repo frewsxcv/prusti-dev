@@ -159,7 +159,8 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotValidityInterface for Lowerer<'p, 'v, 'tcx> {
                 .map(|parameter| parameter.clone().into())
                 .collect(),
         )?;
-        let valid_constructor = self.encode_snapshot_valid_call(domain_name, constructor_call)?;
+        let valid_constructor =
+            self.encode_snapshot_valid_call(domain_name, constructor_call.clone())?;
         if parameters.is_empty() {
             let axiom = vir_low::DomainAxiomDecl {
                 name: format!(
@@ -183,8 +184,11 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotValidityInterface for Lowerer<'p, 'v, 'tcx> {
             // parameters, the bottom-up and top-down axioms are equivalent.
             let mut top_down_validity_expression = validity_expression.clone();
             var_decls! { snapshot: {vir_low::Type::domain(domain_name.to_string())}};
+            let snapshot_expression = snapshot.clone().into();
+            top_down_validity_expression =
+                top_down_validity_expression.replace_self(&snapshot_expression);
             let valid_constructor =
-                self.encode_snapshot_valid_call(domain_name, snapshot.clone().into())?;
+                self.encode_snapshot_valid_call(domain_name, snapshot_expression)?;
             let mut triggers = Vec::new();
             for parameter in &parameters {
                 if self.get_non_primitive_domain(&parameter.ty).is_some() {
@@ -218,6 +222,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotValidityInterface for Lowerer<'p, 'v, 'tcx> {
             };
             self.declare_axiom(domain_name, axiom_top_down)?;
         }
+        let bottom_up_validity_expression = validity_expression.replace_self(&constructor_call);
         let axiom_bottom_up_body = {
             let mut trigger = vec![valid_constructor.clone()];
             trigger.extend(valid_parameters.clone());
@@ -225,7 +230,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotValidityInterface for Lowerer<'p, 'v, 'tcx> {
                 parameters,
                 vec![vir_low::Trigger::new(trigger)],
                 expr! {
-                    [ valid_constructor ] == [ validity_expression ]
+                    [ valid_constructor ] == [ bottom_up_validity_expression ]
                 },
             )
         };

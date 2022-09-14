@@ -17,13 +17,15 @@ use std::collections::BTreeSet;
 pub enum Statement {
     Comment(Comment),
     OldLabel(OldLabel),
-    Inhale(Inhale),
-    Exhale(Exhale),
+    InhalePredicate(InhalePredicate),
+    ExhalePredicate(ExhalePredicate),
+    InhaleExpression(InhaleExpression),
+    ExhaleExpression(ExhaleExpression),
+    Assume(Assume),
+    Assert(Assert),
     Consume(Consume),
     Havoc(Havoc),
     GhostHavoc(GhostHavoc),
-    Assume(Assume),
-    Assert(Assert),
     LoopInvariant(LoopInvariant),
     MovePlace(MovePlace),
     CopyPlace(CopyPlace),
@@ -33,6 +35,12 @@ pub enum Statement {
     GhostAssign(GhostAssign),
     LeakAll(LeakAll),
     SetUnionVariant(SetUnionVariant),
+    Pack(Pack),
+    Unpack(Unpack),
+    Join(Join),
+    Split(Split),
+    ForgetInitialization(ForgetInitialization),
+    RestoreRawBorrowed(RestoreRawBorrowed),
     NewLft(NewLft),
     EndLft(EndLft),
     DeadLifetime(DeadLifetime),
@@ -59,16 +67,18 @@ pub struct OldLabel {
     pub position: Position,
 }
 
-/// Inhale the permission denoted by the place.
-#[display(fmt = "inhale {}", predicate)]
-pub struct Inhale {
+/// Inhale the permission denoted by the place. This operation is automatically
+/// managed by fold-unfold.
+#[display(fmt = "inhale-pred {}", predicate)]
+pub struct InhalePredicate {
     pub predicate: Predicate,
     pub position: Position,
 }
 
-#[display(fmt = "exhale {}", predicate)]
-/// Exhale the permission denoted by the place.
-pub struct Exhale {
+#[display(fmt = "exhale-pred {}", predicate)]
+/// Exhale the permission denoted by the place. This operation is automatically
+/// managed by fold-unfold.
+pub struct ExhalePredicate {
     pub predicate: Predicate,
     pub position: Position,
 }
@@ -93,15 +103,29 @@ pub struct GhostHavoc {
     pub position: Position,
 }
 
+#[display(fmt = "inhale-expr {}", expression)]
+/// Inhale the boolean expression. This operation is ignored by fold-unfold.
+pub struct InhaleExpression {
+    pub expression: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "exhale-expr {}", expression)]
+/// Exhale the boolean expression. This operation is ignored by fold-unfold.
+pub struct ExhaleExpression {
+    pub expression: Expression,
+    pub position: Position,
+}
+
 #[display(fmt = "assume {}", expression)]
-/// Assume the boolean expression.
+/// Assume the pure boolean expression.
 pub struct Assume {
     pub expression: Expression,
     pub position: Position,
 }
 
 #[display(fmt = "assert {}", expression)]
-/// Assert the boolean expression.
+/// Assert the pure boolean expression.
 pub struct Assert {
     pub expression: Expression,
     pub position: Position,
@@ -249,6 +273,43 @@ pub struct LeakAll {}
 #[display(fmt = "set-union-variant {}", variant_place)]
 pub struct SetUnionVariant {
     pub variant_place: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "pack {}", place)]
+pub struct Pack {
+    pub place: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "unpack {}", place)]
+pub struct Unpack {
+    pub place: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "join {}", place)]
+pub struct Join {
+    pub place: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "split {}", place)]
+pub struct Split {
+    pub place: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "forget-initialization {}", place)]
+pub struct ForgetInitialization {
+    pub place: Expression,
+    pub position: Position,
+}
+
+#[display(fmt = "restore {} --* {}", borrowing_place, restored_place)]
+pub struct RestoreRawBorrowed {
+    pub borrowing_place: Expression,
+    pub restored_place: Expression,
     pub position: Position,
 }
 

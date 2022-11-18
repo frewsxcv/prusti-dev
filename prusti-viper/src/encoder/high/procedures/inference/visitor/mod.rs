@@ -223,7 +223,7 @@ impl<'p, 'v, 'tcx> Visitor<'p, 'v, 'tcx> {
         self.process_actions(actions)?;
         state.remove_permissions(&consumed_permissions)?;
         state.insert_permissions(produced_permissions)?;
-        match &statement {
+        match statement {
             vir_typed::Statement::ObtainMutRef(_) => {
                 // The requirements already performed the needed changes.
             }
@@ -261,7 +261,7 @@ impl<'p, 'v, 'tcx> Visitor<'p, 'v, 'tcx> {
                     .push(statement.typed_to_middle_statement(self.encoder)?);
             }
             vir_typed::Statement::Pack(pack_statement) => {
-                state.remove_manually_managed(&pack_statement.place)?;
+                // state.remove_manually_managed(&pack_statement.place)?;
                 let position = pack_statement.position();
                 let place = pack_statement
                     .place
@@ -271,7 +271,7 @@ impl<'p, 'v, 'tcx> Visitor<'p, 'v, 'tcx> {
                 self.current_statements.push(encoded_statement);
             }
             vir_typed::Statement::Unpack(unpack_statement) => {
-                state.insert_manually_managed(unpack_statement.place.clone())?;
+                // state.insert_manually_managed(unpack_statement.place.clone())?;
                 let position = unpack_statement.position();
                 let place = unpack_statement
                     .place
@@ -297,7 +297,7 @@ impl<'p, 'v, 'tcx> Visitor<'p, 'v, 'tcx> {
                 self.current_statements.push(encoded_statement);
             }
             vir_typed::Statement::ForgetInitialization(forget_statement) => {
-                state.insert_manually_managed(forget_statement.place.clone())?;
+                // state.insert_manually_managed(forget_statement.place.clone())?;
                 let position = forget_statement.position();
                 let place = forget_statement
                     .place

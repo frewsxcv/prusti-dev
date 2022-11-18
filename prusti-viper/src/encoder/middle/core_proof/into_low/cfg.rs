@@ -639,7 +639,6 @@ impl IntoLow for vir_mid::Statement {
                     &mut statements,
                     union_place,
                     statement.position,
-                    None,
                 )?;
                 let snapshot = union_place.to_procedure_snapshot(lowerer)?;
                 let discriminant = lowerer.obtain_enum_discriminant(

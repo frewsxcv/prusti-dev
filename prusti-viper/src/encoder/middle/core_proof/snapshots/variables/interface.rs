@@ -38,6 +38,8 @@ trait Private {
         version: u64,
     ) -> SpannedEncodingResult<vir_low::VariableDecl>;
     #[allow(clippy::ptr_arg)] // Clippy false positive.
+    /// Note: if `new_snapshot_root` is `Some`, the current encoding assumes
+    /// that the `place` is not behind a raw pointer.
     fn snapshot_copy_except(
         &mut self,
         statements: &mut Vec<vir_low::Statement>,
@@ -380,7 +382,7 @@ pub(in super::super::super) trait SnapshotVariablesInterface {
         statements: &mut Vec<vir_low::Statement>,
         target: &vir_mid::Expression,
         position: vir_low::Position,
-        new_snapshot: Option<vir_low::VariableDecl>,
+        // new_snapshot: Option<vir_low::VariableDecl>,
     ) -> SpannedEncodingResult<vir_low::Expression>;
     fn encode_snapshot_update_with_new_snapshot(
         &mut self,
@@ -388,8 +390,8 @@ pub(in super::super::super) trait SnapshotVariablesInterface {
         target: &vir_mid::Expression,
         value: vir_low::Expression,
         position: vir_low::Position,
-        new_snapshot: Option<vir_low::VariableDecl>,
-    ) -> SpannedEncodingResult<()>;
+        // new_snapshot: Option<vir_low::VariableDecl>,
+    ) -> SpannedEncodingResult<vir_low::Expression>;
     #[allow(clippy::ptr_arg)] // Clippy false positive.
     fn encode_snapshot_update(
         &mut self,
@@ -562,7 +564,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotVariablesInterface for Lowerer<'p, 'v, 'tcx> 
         statements: &mut Vec<vir_low::Statement>,
         target: &vir_mid::Expression,
         position: vir_low::Position,
-        new_snapshot: Option<vir_low::VariableDecl>,
+        // new_snapshot_root: Option<vir_low::VariableDecl>,
     ) -> SpannedEncodingResult<vir_low::Expression> {
         // let base = target.get_base();
         // self.ensure_type_definition(&base.ty)?;
@@ -614,21 +616,23 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotVariablesInterface for Lowerer<'p, 'v, 'tcx> 
         Ok(new_snapshot)
         // }
     }
+    /// `new_snapshot_root` is used when we want to use a specific variable
+    /// version as the root of the new snapshot.
     fn encode_snapshot_update_with_new_snapshot(
         &mut self,
         statements: &mut Vec<vir_low::Statement>,
         target: &vir_mid::Expression,
         value: vir_low::Expression,
         position: vir_low::Position,
-        new_snapshot: Option<vir_low::VariableDecl>,
-    ) -> SpannedEncodingResult<()> {
+        // new_snapshot_root: Option<vir_low::VariableDecl>,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
         use vir_low::macros::*;
         // self.encode_snapshot_havoc(statements, target, position, new_snapshot)?;
         // statements
         //     .push(stmtp! { position => assume ([target.to_procedure_snapshot(self)?] == [value]) });
         let new_snapshot = self.encode_snapshot_havoc(statements, target, position)?;
-        statements.push(stmtp! { position => assume ([new_snapshot] == [value]) });
-        Ok(())
+        statements.push(stmtp! { position => assume ([new_snapshot.clone()] == [value]) });
+        Ok(new_snapshot)
     }
     fn encode_snapshot_update(
         &mut self,
@@ -637,7 +641,8 @@ impl<'p, 'v: 'p, 'tcx: 'v> SnapshotVariablesInterface for Lowerer<'p, 'v, 'tcx> 
         value: vir_low::Expression,
         position: vir_low::Position,
     ) -> SpannedEncodingResult<()> {
-        self.encode_snapshot_update_with_new_snapshot(statements, target, value, position, None)
+        self.encode_snapshot_update_with_new_snapshot(statements, target, value, position)?;
+        Ok(())
     }
     /// `basic_block_edges` are statements to be executed then going from one
     /// block to another.

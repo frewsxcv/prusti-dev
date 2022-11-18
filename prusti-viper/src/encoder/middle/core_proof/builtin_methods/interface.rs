@@ -2315,13 +2315,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                 source_snapshot.clone(),
                 source_permission_amount,
             )?];
-            let new_snapshot = self.new_snapshot_variable_version(&target.get_base(), position)?;
-            self.encode_snapshot_update_with_new_snapshot(
+            let new_snapshot = self.encode_snapshot_update_with_new_snapshot(
                 &mut copy_place_statements,
                 &target,
                 source_snapshot,
                 position,
-                Some(new_snapshot.clone()),
+                // Some(new_snapshot.clone()),
             )?;
             if let Some(conditions) = value.use_field {
                 let mut disjuncts = Vec::new();
@@ -2329,17 +2328,24 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                     disjuncts.push(self.lower_block_marker_condition(condition)?);
                 }
                 let mut else_branch = vec![assign_statement];
-                self.encode_snapshot_update_with_new_snapshot(
+                let new_snapshot_else_branch = self.encode_snapshot_update_with_new_snapshot(
                     &mut else_branch,
                     &target,
                     result_value.into(),
                     position,
-                    Some(new_snapshot),
+                    // Some(new_snapshot),
                 )?;
                 statements.push(vir_low::Statement::conditional(
                     disjuncts.into_iter().disjoin(),
                     copy_place_statements,
                     else_branch,
+                    position,
+                ));
+                statements.push(vir_low::Statement::assume(
+                    vir_low::Expression::equals(
+                        new_snapshot,
+                        new_snapshot_else_branch,
+                    ),
                     position,
                 ));
             } else {

@@ -44,7 +44,7 @@ use itertools::Itertools;
 use rustc_hash::FxHashSet;
 use vir_crate::{
     common::{
-        expression::{ExpressionIterator, BinaryOperationHelpers, UnaryOperationHelpers},
+        expression::{BinaryOperationHelpers, ExpressionIterator, UnaryOperationHelpers},
         identifier::WithIdentifier,
     },
     low::{self as vir_low, macros::method_name},
@@ -839,105 +839,105 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         // FIXME: Do not hardcode variables here.
                         // Instead pass in the original ones.
                         var_decls!(target_place: Place, target_address: Address);
-                        let decl = self.encoder.get_type_decl_mid(&value.ty)?.unwrap_struct();
-                        if let Some(invariant) = &decl.structural_invariant {
-                            let mut assertion_encoder =
-                                AssertionEncoder::new(&decl, arguments.clone(), &heap);
-                            if self.use_heap_variable()? {
-                                // TODO: Add a postcondition that is the
-                                // structural invariant that equates snap
-                                // calls from the input predicates to
-                                // projections on `result_value`.
-                                let deref_fields = self.structural_invariant_to_deref_fields(
-                                    invariant.clone(),
-                                    &value.ty,
-                                    &decl,
-                                )?;
-                                for deref in deref_fields {
-                                    let base_snapshot = assertion_encoder.expression_to_snapshot(
-                                        self,
-                                        &deref.base,
-                                        true,
-                                    )?;
-                                    let argument = if let Some(heap) = heap.as_ref() {
-                                        let in_heap =
-                                            assertion_encoder.address_in_heap(self, &deref.base)?;
-                                        // let in_heap = self.address_in_heap(heap.clone(), &deref.base)?;
-                                        pres.push(in_heap);
-                                        self.pointer_target_snapshot_in_heap(
-                                            deref.base.get_type(),
-                                            heap.clone(),
-                                            base_snapshot,
-                                            position,
-                                        )?
-                                    } else {
-                                        // let deref_value = assertion_encoder
-                                        //     .expression_to_snapshot(self, &deref.base, true)?;
-                                        let address = self.pointer_address(
-                                            deref.base.get_type(),
-                                            base_snapshot,
-                                            position,
-                                        )?;
-                                        let ty = &deref.ty;
-                                        self.owned_aliased_snap(
-                                            CallContext::BuiltinMethod,
-                                            ty,
-                                            ty,
-                                            address,
-                                            position,
-                                        )?
-                                    };
-                                    arguments.push(argument);
-                                    // if self.use_heap_variable()? {
-                                    //     let in_heap =
-                                    //         assertion_encoder.address_in_heap(self, &deref.base)?;
-                                    //     // let in_heap = self.address_in_heap(heap.clone(), &deref.base)?;
-                                    //     pres.push(in_heap);
-                                    // }
-                                }
-                            } else {
-                                assert_eq!(arguments.len(), decl.fields.len());
-                                for (argument, field) in arguments.iter().zip(decl.fields.iter()) {
-                                    let field_snapshot = self.obtain_struct_field_snapshot(
-                                        result_type,
-                                        field,
-                                        result_value.clone().into(),
-                                        position,
-                                    )?;
-                                    posts.push(vir_low::Expression::equals(
-                                        argument.clone(),
-                                        field_snapshot,
-                                    ))
-                                }
-                                let predicate = self
-                                    .owned_non_aliased_predicate(
-                                        CallContext::BuiltinMethod,
-                                        result_type,
-                                        result_type,
-                                        target_place.clone().into(),
-                                        target_address.clone().into(),
-                                        true.into(),
-                                        None,
-                                    )?
-                                    .unwrap_predicate_access_predicate();
-                                assertion_encoder.set_result_value(result_value.clone());
-                                for assertion in invariant {
-                                    let low_assertion = assertion_encoder
-                                        .expression_to_snapshot(self, assertion, true)?;
-                                    posts.push(vir_low::Expression::unfolding(
-                                        predicate.clone(),
-                                        low_assertion,
-                                        position,
-                                    ));
-                                }
-                                assertion_encoder.unset_result_value();
-                            }
-                            for assertion in invariant {
-                                let low_assertion = assertion_encoder
-                                    .expression_to_snapshot(self, assertion, true)?;
-                                pres.push(low_assertion);
-                            }
-                        }
+                        // let decl = self.encoder.get_type_decl_mid(&value.ty)?.unwrap_struct();
+                        // if let Some(invariant) = &decl.structural_invariant {
+                        //     let mut assertion_encoder =
+                        //         AssertionEncoder::new(&decl, arguments.clone(), &heap);
+                        //     if self.use_heap_variable()? {
+                        //         // TODO: Add a postcondition that is the
+                        //         // structural invariant that equates snap
+                        //         // calls from the input predicates to
+                        //         // projections on `result_value`.
+                        //         let deref_fields = self.structural_invariant_to_deref_fields(
+                        //             invariant.clone(),
+                        //             &value.ty,
+                        //             &decl,
+                        //         )?;
+                        //         for deref in deref_fields {
+                        //             let base_snapshot = assertion_encoder.expression_to_snapshot(
+                        //                 self,
+                        //                 &deref.base,
+                        //                 true,
+                        //             )?;
+                        //             let argument = if let Some(heap) = heap.as_ref() {
+                        //                 let in_heap =
+                        //                     assertion_encoder.address_in_heap(self, &deref.base)?;
+                        //                 // let in_heap = self.address_in_heap(heap.clone(), &deref.base)?;
+                        //                 pres.push(in_heap);
+                        //                 self.pointer_target_snapshot_in_heap(
+                        //                     deref.base.get_type(),
+                        //                     heap.clone(),
+                        //                     base_snapshot,
+                        //                     position,
+                        //                 )?
+                        //             } else {
+                        //                 // let deref_value = assertion_encoder
+                        //                 //     .expression_to_snapshot(self, &deref.base, true)?;
+                        //                 let address = self.pointer_address(
+                        //                     deref.base.get_type(),
+                        //                     base_snapshot,
+                        //                     position,
+                        //                 )?;
+                        //                 let ty = &deref.ty;
+                        //                 self.owned_aliased_snap(
+                        //                     CallContext::BuiltinMethod,
+                        //                     ty,
+                        //                     ty,
+                        //                     address,
+                        //                     position,
+                        //                 )?
+                        //             };
+                        //             arguments.push(argument);
+                        //             // if self.use_heap_variable()? {
+                        //             //     let in_heap =
+                        //             //         assertion_encoder.address_in_heap(self, &deref.base)?;
+                        //             //     // let in_heap = self.address_in_heap(heap.clone(), &deref.base)?;
+                        //             //     pres.push(in_heap);
+                        //             // }
+                        //         }
+                        //     } else {
+                        //         assert_eq!(arguments.len(), decl.fields.len());
+                        //         for (argument, field) in arguments.iter().zip(decl.fields.iter()) {
+                        //             let field_snapshot = self.obtain_struct_field_snapshot(
+                        //                 result_type,
+                        //                 field,
+                        //                 result_value.clone().into(),
+                        //                 position,
+                        //             )?;
+                        //             posts.push(vir_low::Expression::equals(
+                        //                 argument.clone(),
+                        //                 field_snapshot,
+                        //             ))
+                        //         }
+                        //         let predicate = self
+                        //             .owned_non_aliased_predicate(
+                        //                 CallContext::BuiltinMethod,
+                        //                 result_type,
+                        //                 result_type,
+                        //                 target_place.clone().into(),
+                        //                 target_address.clone().into(),
+                        //                 true.into(),
+                        //                 None,
+                        //             )?
+                        //             .unwrap_predicate_access_predicate();
+                        //         assertion_encoder.set_result_value(result_value.clone());
+                        //         for assertion in invariant {
+                        //             let low_assertion = assertion_encoder
+                        //                 .expression_to_snapshot(self, assertion, true)?;
+                        //             posts.push(vir_low::Expression::unfolding(
+                        //                 predicate.clone(),
+                        //                 low_assertion,
+                        //                 position,
+                        //             ));
+                        //         }
+                        //         assertion_encoder.unset_result_value();
+                        //     }
+                        //     for assertion in invariant {
+                        //         let low_assertion = assertion_encoder
+                        //             .expression_to_snapshot(self, assertion, true)?;
+                        //         pres.push(low_assertion);
+                        //     }
+                        // }
                         if self.use_heap_variable()? {
                             parameters.push(heap.clone().unwrap());
                             // TODO: add the invariant to the precondition with
@@ -2342,10 +2342,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                     position,
                 ));
                 statements.push(vir_low::Statement::assume(
-                    vir_low::Expression::equals(
-                        new_snapshot,
-                        new_snapshot_else_branch,
-                    ),
+                    vir_low::Expression::equals(new_snapshot, new_snapshot_else_branch),
                     position,
                 ));
             } else {
@@ -2394,8 +2391,11 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                     self.encode_snapshot_update(statements, &value.place, snapshot, position)?;
                 }
                 vir_mid::Rvalue::AddressOf(value) => {
-                    let address =
-                        self.pointer_address(target.get_type(), result_value.clone().into(), position)?;
+                    let address = self.pointer_address(
+                        target.get_type(),
+                        result_value.clone().into(),
+                        position,
+                    )?;
                     let heap = self.heap_variable_version_at_label(&None)?;
                     statements.push(vir_low::Statement::assume(
                         vir_low::Expression::container_op_no_pos(

@@ -256,7 +256,7 @@ pub enum BuiltinFunc {
     Index,
     Len,
     IsNull,
-    IsValid,
+    IsValid, // TODO: Delete.
     EnsureOwnedPredicate,
     // GetSnapshot,
 }

@@ -18,8 +18,9 @@ use crate::encoder::{
         footprint::FootprintInterface,
         lowerer::{DomainsLowererInterface, Lowerer},
         snapshots::{
-            IntoPureBoolExpression, IntoPureSnapshot, IntoSnapshot, SnapshotAdtsInterface,
-            SnapshotDomainsInterface, SnapshotValidityInterface, SnapshotValuesInterface,
+            IntoPureBoolExpression, IntoPureSnapshot, IntoSnapshot, IntoSnapshotLowerer,
+            SnapshotAdtsInterface, SnapshotDomainsInterface, SnapshotValidityInterface,
+            SnapshotValuesInterface, ValidityAssertionToSnapshot,
         },
         type_layouts::TypeLayoutsInterface,
     },
@@ -137,24 +138,39 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         field.ty.to_snapshot(self)?,
                     ));
                 }
+                let parameters_with_validity = decl.fields.len();
                 let invariant = if let Some(invariant) = &decl.structural_invariant {
-                    let invariant = self.structural_invariant_to_pure_expression(
-                        invariant.clone(),
-                        ty,
-                        decl,
-                        &mut parameters,
-                    )?;
+                    let deref_fields = self.structural_invariant_to_deref_fields(invariant)?;
+                    for (_, name, ty) in &deref_fields {
+                        parameters.push(vir_low::VariableDecl::new(name, ty.clone()));
+                    }
+                    let mut validity_assertion_encoder =
+                        ValidityAssertionToSnapshot::new(deref_fields);
+                    // let invariant = self.structural_invariant_to_pure_expression(
+                    //     invariant.clone(),
+                    //     ty,
+                    //     decl,
+                    //     &mut parameters,
+                    // )?;
                     let mut conjuncts = Vec::new();
                     for expression in invariant {
-                        conjuncts.push(expression.to_pure_bool_expression(self)?);
+                        conjuncts.push(
+                            validity_assertion_encoder
+                                .expression_to_snapshot(self, expression, true)?,
+                        );
+                        // conjuncts.push(expression.to_pure_bool_expression(self)?);
                     }
-
                     conjuncts.into_iter().conjoin() //.remove_acc_predicates()
                 } else {
                     true.into()
                 };
                 self.register_struct_constructor(&domain_name, parameters.clone())?;
-                self.encode_validity_axioms_struct(&domain_name, parameters, invariant)?;
+                self.encode_validity_axioms_struct_with_invariant(
+                    &domain_name,
+                    parameters,
+                    parameters_with_validity,
+                    invariant,
+                )?;
             }
             vir_mid::TypeDecl::Enum(decl) => {
                 let mut variants = Vec::new();
@@ -190,7 +206,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                 self.register_struct_constructor(&domain_name, parameters.clone())?;
                 // self.register_constant_constructor(&domain_name, address_type.clone())?;
                 // self.encode_validity_axioms_primitive(&domain_name, address_type, true.into())?;
-                self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
+                self.encode_validity_axioms_struct(&domain_name, parameters)?;
             }
             vir_mid::TypeDecl::Reference(decl) => {
                 self.ensure_type_definition(&decl.target_type)?;
@@ -206,7 +222,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         parameters.push(vir_low::VariableDecl::new("len", len_type));
                     }
                     self.register_struct_constructor(&domain_name, parameters.clone())?;
-                    self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
+                    self.encode_validity_axioms_struct(&domain_name, parameters)?;
                 } else {
                     let mut parameters = vars! {
                         address: Address,
@@ -217,7 +233,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         parameters.push(vir_low::VariableDecl::new("len", len_type));
                     }
                     self.register_struct_constructor(&domain_name, parameters.clone())?;
-                    self.encode_validity_axioms_struct(&domain_name, parameters, true.into())?;
+                    self.encode_validity_axioms_struct(&domain_name, parameters)?;
                     let no_alloc_parameters = vars! { target_current: {target_type} };
                     self.register_alternative_constructor_with_injectivity_axioms(
                         &domain_name,
@@ -225,17 +241,24 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         true,
                         no_alloc_parameters.clone(),
                     )?;
+                    let parameters_with_validity = no_alloc_parameters.len();
                     self.encode_validity_axioms_struct_alternative_constructor(
                         &domain_name,
                         "no_alloc",
                         no_alloc_parameters,
+                        parameters_with_validity,
                         true.into(),
                     )?;
                 }
             }
             vir_mid::TypeDecl::Never => {
                 self.register_struct_constructor(&domain_name, Vec::new())?;
-                self.encode_validity_axioms_struct(&domain_name, Vec::new(), false.into())?;
+                self.encode_validity_axioms_struct_with_invariant(
+                    &domain_name,
+                    Vec::new(),
+                    0,
+                    false.into(),
+                )?;
             }
             _ => unimplemented!("type: {:?}", type_decl),
         };

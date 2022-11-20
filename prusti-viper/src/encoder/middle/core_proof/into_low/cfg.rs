@@ -635,11 +635,7 @@ impl IntoLow for vir_mid::Statement {
                 let variant_index = variant_place.clone().unwrap_variant().variant_index;
                 let union_place = variant_place.get_parent_ref().unwrap();
                 let mut statements = Vec::new();
-                lowerer.encode_snapshot_havoc(
-                    &mut statements,
-                    union_place,
-                    statement.position,
-                )?;
+                lowerer.encode_snapshot_havoc(&mut statements, union_place, statement.position)?;
                 let snapshot = union_place.to_procedure_snapshot(lowerer)?;
                 let discriminant = lowerer.obtain_enum_discriminant(
                     snapshot,

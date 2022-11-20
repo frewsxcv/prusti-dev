@@ -3,9 +3,11 @@ use crate::encoder::{
     middle::core_proof::{
         addresses::AddressesInterface,
         builtin_methods::CallContext,
+        footprint::FootprintInterface,
         lifetimes::LifetimesInterface,
         lowerer::Lowerer,
         places::PlacesInterface,
+        pointers::PointersInterface,
         predicates::{
             owned::builders::common::function_decl::FunctionDeclBuilder, OwnedNonAliasedUseBuilder,
             PredicatesMemoryBlockInterface, PredicatesOwnedInterface,
@@ -15,16 +17,19 @@ use crate::encoder::{
             IntoPureSnapshot, IntoSnapshotLowerer, SnapshotBytesInterface,
             SnapshotValidityInterface, SnapshotValuesInterface,
         },
-        type_layouts::TypeLayoutsInterface, footprint::FootprintInterface, pointers::PointersInterface,
+        type_layouts::TypeLayoutsInterface,
     },
 };
 
 use vir_crate::{
-    common::{expression::{QuantifierHelpers, ExpressionIterator}, position::Positioned},
+    common::{
+        expression::{ExpressionIterator, QuantifierHelpers},
+        position::Positioned,
+    },
     low::{self as vir_low},
     middle::{
         self as vir_mid,
-        operations::{const_generics::WithConstArguments, lifetimes::WithLifetimes}, operations::ty::Typed,
+        operations::{const_generics::WithConstArguments, lifetimes::WithLifetimes, ty::Typed},
     },
 };
 
@@ -455,44 +460,48 @@ impl<'l, 'p, 'v, 'tcx> OwnedNonAliasedSnapFunctionBuilder<'l, 'p, 'v, 'tcx> {
         if let Some(invariant) = &decl.structural_invariant {
             use vir_low::macros::*;
             let result = self.inner.result()?;
-            let mut equalities = Vec::new();
-            for assertion in invariant {
-                for (guard, place) in assertion.collect_guarded_owned_places() {
-                    let parameter = self.inner.lowerer.compute_deref_parameter(&place)?;
-                    let deref_result_snapshot = self.inner.lowerer.obtain_parameter_snapshot(
-                        self.inner.ty,
-                        &parameter.name,
-                        parameter.ty,
-                        result.clone().into(),
-                        self.inner.position,
-                    )?;
-                    let ty = place.get_type();
-                    let place_low = self.inner.lowerer.encode_expression_as_place(&place)?;
-                    let root_address_low = {
-                        // Code duplication with pointer_deref_into_address
-                        let deref_place = place.get_last_dereferenced_pointer().unwrap();
-                        // TODO: replace self in deref_place with result.
-                        let base_snapshot = deref_place.to_pure_snapshot(self.inner.lowerer)?;
-                        let ty = deref_place.get_type();
-                        self.inner
-                            .lowerer
-                            .pointer_address(ty, base_snapshot, place.position())?
-                    };
-                    let snap_call = self.inner.lowerer.owned_non_aliased_snap(
-                        CallContext::BuiltinMethod,
-                        ty,
-                        ty,
-                        place_low,
-                        root_address_low,
-                        self.inner.position,
-                    )?;
-                    equalities.push(expr! {
-                        [deref_result_snapshot] == [snap_call]
-                    });
-                }
-            }
-            self.add_unfolding_postcondition(equalities.into_iter().conjoin())?;
+            let assertion = invariant.iter().cloned().conjoin();
+            let owned_places = assertion.collect_owned_places();
+
+            //     let mut equalities = Vec::new();
+            //     for assertion in invariant {
+            //         for (guard, place) in assertion.collect_guarded_owned_places() {
+            //             let parameter = self.inner.lowerer.compute_deref_parameter(&place)?;
+            //             let deref_result_snapshot = self.inner.lowerer.obtain_parameter_snapshot(
+            //                 self.inner.ty,
+            //                 &parameter.name,
+            //                 parameter.ty,
+            //                 result.clone().into(),
+            //                 self.inner.position,
+            //             )?;
+            //             let ty = place.get_type();
+            //             let place_low = self.inner.lowerer.encode_expression_as_place(&place)?;
+            //             let root_address_low = {
+            //                 // Code duplication with pointer_deref_into_address
+            //                 let deref_place = place.get_last_dereferenced_pointer().unwrap();
+            //                 // TODO: replace self in deref_place with result.
+            //                 let base_snapshot = deref_place.to_pure_snapshot(self.inner.lowerer)?;
+            //                 let ty = deref_place.get_type();
+            //                 self.inner
+            //                     .lowerer
+            //                     .pointer_address(ty, base_snapshot, place.position())?
+            //             };
+            //             let snap_call = self.inner.lowerer.owned_non_aliased_snap(
+            //                 CallContext::BuiltinMethod,
+            //                 ty,
+            //                 ty,
+            //                 place_low,
+            //                 root_address_low,
+            //                 self.inner.position,
+            //             )?;
+            //             equalities.push(expr! {
+            //                 [deref_result_snapshot] == [snap_call]
+            //             });
+            //         }
+            //     }
+            //     self.add_unfolding_postcondition(equalities.into_iter().conjoin())?;
         }
+
         // // FIXME: Code duplication with encode_assign_method_rvalue
         // if let Some(invariant) = &decl.structural_invariant {
         //     let mut assertion_encoder =

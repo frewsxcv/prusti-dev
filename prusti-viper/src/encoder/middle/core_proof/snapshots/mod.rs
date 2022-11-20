@@ -17,6 +17,7 @@ pub(super) use self::{
         IntoBuiltinMethodSnapshot, IntoProcedureAssertion, IntoProcedureBoolExpression,
         IntoProcedureFinalSnapshot, IntoProcedureSnapshot, IntoPureBoolExpression,
         IntoPureSnapshot, IntoSnapshot, IntoSnapshotLowerer, SelfFramingAssertionToSnapshot,
+        ValidityAssertionToSnapshot,
     },
     state::SnapshotsState,
     validity::{valid_call, valid_call2, SnapshotValidityInterface},

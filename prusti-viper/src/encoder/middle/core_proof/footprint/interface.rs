@@ -2,7 +2,7 @@ use crate::encoder::{
     errors::SpannedEncodingResult,
     middle::core_proof::{lowerer::Lowerer, snapshots::IntoSnapshot},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use vir_crate::{
     common::position::Positioned,
     low as vir_low,
@@ -17,6 +17,7 @@ struct FootprintComputation<'l, 'p, 'v, 'tcx> {
     derefs: Vec<vir_mid::Deref>,
 }
 
+// FIXME: Delete.
 impl<'l, 'p, 'v, 'tcx> FootprintComputation<'l, 'p, 'v, 'tcx> {
     fn new(
         lowerer: &'l mut Lowerer<'p, 'v, 'tcx>,
@@ -45,6 +46,7 @@ impl<'l, 'p, 'v, 'tcx> FootprintComputation<'l, 'p, 'v, 'tcx> {
         }
     }
 
+    // FIXME: This should be using `own` places.
     fn create_deref_field(&mut self, deref: &vir_mid::Deref) -> vir_mid::Expression {
         match &*deref.base {
             vir_mid::Expression::Field(expression) => {
@@ -226,15 +228,15 @@ pub(in super::super) trait FootprintInterface {
     //     parameters: &BTreeMap<vir_mid::VariableDecl, &vir_mid::type_decl::Struct>,
     // ) -> SpannedEncodingResult<Vec<vir_mid::Expression>>;
 
-    /// Rewrite expression so that it is based only on the snapshots, removing
-    /// all predicates.
-    fn structural_invariant_to_pure_expression(
-        &mut self,
-        expressions: Vec<vir_mid::Expression>,
-        ty: &vir_mid::Type,
-        decl: &vir_mid::type_decl::Struct,
-        fields: &mut Vec<vir_low::VariableDecl>,
-    ) -> SpannedEncodingResult<Vec<vir_mid::Expression>>;
+    // /// Rewrite expression so that it is based only on the snapshots, removing
+    // /// all predicates.
+    // fn structural_invariant_to_pure_expression(
+    //     &mut self,
+    //     expressions: Vec<vir_mid::Expression>,
+    //     ty: &vir_mid::Type,
+    //     decl: &vir_mid::type_decl::Struct,
+    //     fields: &mut Vec<vir_low::VariableDecl>,
+    // ) -> SpannedEncodingResult<Vec<vir_mid::Expression>>;
 
     // fn structural_invariant_to_predicate_assertion(
     //     &mut self,
@@ -243,24 +245,43 @@ pub(in super::super) trait FootprintInterface {
 
     fn structural_invariant_to_deref_fields(
         &mut self,
-        expressions: Vec<vir_mid::Expression>,
-        ty: &vir_mid::Type,
-        decl: &vir_mid::type_decl::Struct,
-    ) -> SpannedEncodingResult<Vec<vir_mid::Deref>>;
+        invariant: &[vir_mid::Expression],
+    ) -> SpannedEncodingResult<Vec<(vir_mid::Expression, String, vir_low::Type)>>;
 
-    fn compute_deref_parameter(
+    fn compute_deref_field_from_place(
         &mut self,
         place: &vir_mid::Expression,
-    ) -> SpannedEncodingResult<vir_low::VariableDecl>;
+    ) -> SpannedEncodingResult<(String, vir_low::Type)>;
 }
 
 impl<'p, 'v: 'p, 'tcx: 'v> FootprintInterface for Lowerer<'p, 'v, 'tcx> {
+    /// For the given invariant, compute the deref fields. This is done by
+    /// finding all `own` predicates and creating variables for them.
+    ///
+    /// The order of the returned fields is guaranteed to be the same for the
+    /// same invariant.
+    fn structural_invariant_to_deref_fields(
+        &mut self,
+        invariant: &[vir_mid::Expression],
+    ) -> SpannedEncodingResult<Vec<(vir_mid::Expression, String, vir_low::Type)>> {
+        let mut owned_places = BTreeSet::default();
+        for expression in invariant {
+            owned_places.extend(expression.collect_owned_places());
+        }
+        let mut fields = Vec::new();
+        for owned_place in owned_places {
+            let (name, ty) = self.compute_deref_field_from_place(&owned_place)?;
+            fields.push((owned_place, name, ty));
+        }
+        Ok(fields)
+    }
+
     /// Computes the parameter that corresponds to the value of
     /// the dereferenced place.
-    fn compute_deref_parameter(
+    fn compute_deref_field_from_place(
         &mut self,
         place: &vir_mid::Expression,
-    ) -> SpannedEncodingResult<vir_low::VariableDecl> {
+    ) -> SpannedEncodingResult<(String, vir_low::Type)> {
         let mut parameter_name = String::new();
         fn compute_name(
             place: &vir_mid::Expression,
@@ -286,10 +307,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> FootprintInterface for Lowerer<'p, 'v, 'tcx> {
             Ok(())
         }
         compute_name(place, &mut parameter_name)?;
-        Ok(vir_low::VariableDecl::new(
-            parameter_name,
-            place.get_type().to_snapshot(self)?,
-        ))
+        Ok((parameter_name, place.get_type().to_snapshot(self)?))
     }
     // fn purify_expressions(
     //     &mut self,
@@ -304,47 +322,31 @@ impl<'p, 'v: 'p, 'tcx: 'v> FootprintInterface for Lowerer<'p, 'v, 'tcx> {
     //     Ok(purified_expressions)
     // }
 
-    fn structural_invariant_to_pure_expression(
-        &mut self,
-        expressions: Vec<vir_mid::Expression>,
-        ty: &vir_mid::Type,
-        decl: &vir_mid::type_decl::Struct,
-        fields: &mut Vec<vir_low::VariableDecl>,
-    ) -> SpannedEncodingResult<Vec<vir_mid::Expression>> {
-        let self_variable = vir_mid::VariableDecl::self_variable(ty.clone());
-        let mut parameters = BTreeMap::new();
-        parameters.insert(self_variable, decl);
-        let mut computation = FootprintComputation::new(self, &parameters);
-        let mut purified_expressions = Vec::with_capacity(expressions.len());
-        for expression in expressions {
-            purified_expressions.push(computation.fold_expression(expression));
-        }
-        let deref_fields = computation.into_deref_fields();
-        for (deref_field, _) in deref_fields {
-            fields.push(vir_low::VariableDecl::new(
-                deref_field.name,
-                deref_field.ty.to_snapshot(self)?,
-            ));
-        }
-        Ok(purified_expressions)
-    }
-
-    fn structural_invariant_to_deref_fields(
-        &mut self,
-        expressions: Vec<vir_mid::Expression>,
-        ty: &vir_mid::Type,
-        decl: &vir_mid::type_decl::Struct,
-    ) -> SpannedEncodingResult<Vec<vir_mid::Deref>> {
-        let self_variable = vir_mid::VariableDecl::self_variable(ty.clone());
-        let mut parameters = BTreeMap::new();
-        parameters.insert(self_variable, decl);
-        let mut computation = FootprintComputation::new(self, &parameters);
-        for expression in expressions {
-            // FIXME: Walk instead of folding.
-            computation.fold_expression(expression);
-        }
-        Ok(computation.into_derefs())
-    }
+    // FIXME: Delete.
+    // fn structural_invariant_to_pure_expression(
+    //     &mut self,
+    //     expressions: Vec<vir_mid::Expression>,
+    //     ty: &vir_mid::Type,
+    //     decl: &vir_mid::type_decl::Struct,
+    //     fields: &mut Vec<vir_low::VariableDecl>,
+    // ) -> SpannedEncodingResult<Vec<vir_mid::Expression>> {
+    //     let self_variable = vir_mid::VariableDecl::self_variable(ty.clone());
+    //     let mut parameters = BTreeMap::new();
+    //     parameters.insert(self_variable, decl);
+    //     let mut computation = FootprintComputation::new(self, &parameters);
+    //     let mut purified_expressions = Vec::with_capacity(expressions.len());
+    //     for expression in expressions {
+    //         purified_expressions.push(computation.fold_expression(expression));
+    //     }
+    //     let deref_fields = computation.into_deref_fields();
+    //     for (deref_field, _) in deref_fields {
+    //         fields.push(vir_low::VariableDecl::new(
+    //             deref_field.name,
+    //             deref_field.ty.to_snapshot(self)?,
+    //         ));
+    //     }
+    //     Ok(purified_expressions)
+    // }
 
     // fn structural_invariant_to_predicate_assertion(
     //     &mut self,

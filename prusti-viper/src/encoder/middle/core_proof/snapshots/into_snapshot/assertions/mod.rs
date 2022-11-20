@@ -5,5 +5,9 @@ mod self_framing;
 mod snap;
 /// Assertions where the places are translated by using `heap$` pure variable.
 mod pure_heap;
+/// The snapshot validity assertion.
+mod validity;
 
-pub(in super::super::super::super) use self_framing::SelfFramingAssertionToSnapshot;
+pub(in super::super::super::super) use self::{
+    self_framing::SelfFramingAssertionToSnapshot, validity::ValidityAssertionToSnapshot,
+};

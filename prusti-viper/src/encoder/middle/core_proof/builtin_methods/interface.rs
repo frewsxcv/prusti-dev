@@ -34,8 +34,8 @@ use crate::encoder::{
         snapshots::{
             AssertionToSnapshotConstructor, BuiltinFunctionsInterface, IntoBuiltinMethodSnapshot,
             IntoProcedureFinalSnapshot, IntoProcedureSnapshot, IntoPureSnapshot, IntoSnapshot,
-            IntoSnapshotLowerer, SnapshotBytesInterface, SnapshotValidityInterface,
-            SnapshotValuesInterface, SnapshotVariablesInterface,
+            IntoSnapshotLowerer, SelfFramingAssertionToSnapshot, SnapshotBytesInterface,
+            SnapshotValidityInterface, SnapshotValuesInterface, SnapshotVariablesInterface,
         },
         type_layouts::TypeLayoutsInterface,
     },
@@ -838,12 +838,25 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         } else {
                             None
                         };
-                        // FIXME: Do not hardcode variables here.
-                        // Instead pass in the original ones.
-                        var_decls!(target_place: Place, target_address: Address);
+                        // // FIXME: Do not hardcode variables here.
+                        // // Instead pass in the original ones.
+                        // var_decls!(target_place: Place, target_address: Address);
                         let decl = self.encoder.get_type_decl_mid(&value.ty)?.unwrap_struct();
                         if let Some(invariant) = decl.structural_invariant {
                             assert_eq!(arguments.len(), decl.fields.len());
+                            // Assert the invariant for the struct in the precondition.
+                            let mut invariant_encoder =
+                                SelfFramingAssertionToSnapshot::for_assign_precondition(
+                                    arguments.clone(),
+                                    decl.fields.clone(),
+                                );
+                            for assertion in &invariant {
+                                pres.push(
+                                    invariant_encoder
+                                        .expression_to_snapshot(self, assertion, true)?,
+                                );
+                            }
+                            // Create the snapshot constructor.
                             let deref_fields =
                                 self.structural_invariant_to_deref_fields(&invariant)?;
                             let mut constructor_encoder =

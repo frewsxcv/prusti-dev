@@ -10,7 +10,7 @@ use crate::encoder::{
         snapshots::IntoSnapshotLowerer,
     },
 };
-
+use rustc_hash::FxHashMap;
 use vir_crate::{
     common::position::Positioned,
     low::{self as vir_low},
@@ -29,6 +29,9 @@ pub(in super::super::super::super::super) struct SelfFramingAssertionToSnapshot 
     // need to play with `if` statements.
     place: Option<vir_low::VariableDecl>,
     root_address: Option<vir_low::VariableDecl>,
+    /// A map for replacing `self.field` with a matching argument. Used in
+    /// assign postcondition.
+    field_replacement_map: FxHashMap<vir_mid::FieldDecl, vir_low::Expression>,
     heap: Option<vir_low::VariableDecl>,
 }
 
@@ -38,9 +41,27 @@ impl SelfFramingAssertionToSnapshot {
         root_address: vir_low::VariableDecl,
     ) -> Self {
         Self {
+            snap_calls: Vec::new(),
             place: Some(place),
             root_address: Some(root_address),
+            field_replacement_map: FxHashMap::default(),
+            heap: None,
+        }
+    }
+
+    pub(in super::super::super::super::super) fn for_assign_precondition(
+        regular_field_arguments: Vec<vir_low::Expression>,
+        fields: Vec<vir_mid::FieldDecl>,
+    ) -> Self {
+        let field_replacement_map = fields
+            .into_iter()
+            .zip(regular_field_arguments.iter().cloned())
+            .collect();
+        Self {
             snap_calls: Vec::new(),
+            place: None,
+            root_address: None,
+            field_replacement_map,
             heap: None,
         }
     }
@@ -134,6 +155,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> IntoSnapshotLowerer<'p, 'v, 'tcx> for SelfFramingAsse
                     self.predicate_root_address(),
                     local.position,
                 )
+            }
+            vir_mid::Expression::Local(local)
+                if local.variable.is_self_variable()
+                    && self.field_replacement_map.contains_key(&field.field) =>
+            {
+                Ok(self.field_replacement_map[&field.field].clone())
             }
             _ => self.field_to_snapshot_impl(lowerer, field, expect_math_bool),
         }

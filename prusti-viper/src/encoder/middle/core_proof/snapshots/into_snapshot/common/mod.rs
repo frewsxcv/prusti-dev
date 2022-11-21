@@ -225,11 +225,21 @@ pub(in super::super::super) trait IntoSnapshotLowerer<'p, 'v: 'p, 'tcx: 'v>:
         let base_snapshot = self.expression_to_snapshot(lowerer, &deref.base, expect_math_bool)?;
         let ty = deref.base.get_type();
         let result = if ty.is_reference() {
-            lowerer.reference_target_current_snapshot(ty, base_snapshot, Default::default())?
+            lowerer.reference_target_current_snapshot(ty, base_snapshot, deref.position)?
         } else {
-            unreachable!("For this case, this function should be overriden.")
+            self.pointer_deref_to_snapshot(lowerer, deref, base_snapshot, expect_math_bool)?
         };
         self.ensure_bool_expression(lowerer, deref.get_type(), result, expect_math_bool)
+    }
+
+    fn pointer_deref_to_snapshot(
+        &mut self,
+        _lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+        _deref: &vir_mid::Deref,
+        _base_snapshot: vir_low::Expression,
+        _expect_math_bool: bool,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
+        unreachable!("Should be overriden.");
     }
 
     fn addr_of_to_snapshot(

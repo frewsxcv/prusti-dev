@@ -23,6 +23,7 @@ pub(super) fn add_unfolding_expressions(
 struct Ensurer {
     syntactically_framed_places: Vec<vir_typed::Expression>,
 }
+
 impl Ensurer {
     fn add_unfolding(
         &self,
@@ -77,6 +78,12 @@ impl Ensurer {
     }
 
     /// Just unfold on all levels except on deref.
+    ///
+    /// FIXME: This should take into account what places are actually framed by
+    /// the structural invariant. For example, if the invariant contains
+    /// `own!((*self.p).x)` (that is, it frames only one field of the struct),
+    /// then we currently will generate one unfolding too many (we would
+    /// generate unfolding of `self.p` even though we should not).
     fn add_self_unfolding_rec(
         &self,
         place: &vir_typed::Expression,

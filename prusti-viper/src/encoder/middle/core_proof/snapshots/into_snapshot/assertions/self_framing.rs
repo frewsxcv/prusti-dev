@@ -52,6 +52,7 @@ impl SelfFramingAssertionToSnapshot {
     pub(in super::super::super::super::super) fn for_assign_precondition(
         regular_field_arguments: Vec<vir_low::Expression>,
         fields: Vec<vir_mid::FieldDecl>,
+        heap: Option<vir_low::VariableDecl>,
     ) -> Self {
         let field_replacement_map = fields
             .into_iter()
@@ -62,7 +63,7 @@ impl SelfFramingAssertionToSnapshot {
             place: None,
             root_address: None,
             field_replacement_map,
-            heap: None,
+            heap,
         }
     }
 
@@ -208,24 +209,40 @@ impl<'p, 'v: 'p, 'tcx: 'v> IntoSnapshotLowerer<'p, 'v, 'tcx> for SelfFramingAsse
                 let ty = predicate.place.get_type();
                 let place = lowerer.encode_expression_as_place(&predicate.place)?;
                 let root_address = self.pointer_deref_into_address(lowerer, &predicate.place)?;
-                let snapshot = true.into();
-                let acc = lowerer.owned_non_aliased_predicate(
-                    CallContext::Procedure,
-                    ty,
-                    ty,
-                    place.clone(),
-                    root_address.clone(),
-                    snapshot,
-                    None,
-                )?;
-                let snap_call = lowerer.owned_non_aliased_snap(
-                    CallContext::BuiltinMethod,
-                    ty,
-                    ty,
-                    place,
-                    root_address,
-                    predicate.place.position(),
-                )?;
+
+                let (acc, snap_call) = if self.heap.is_some() {
+                    let snapshot = self.expression_to_snapshot(lowerer, &predicate.place, true)?;
+                    let acc = lowerer.owned_non_aliased(
+                        CallContext::BuiltinMethod,
+                        ty,
+                        ty,
+                        place.clone(),
+                        root_address.clone(),
+                        snapshot.clone(),
+                        None,
+                    )?;
+                    (acc, snapshot)
+                } else {
+                    let snapshot = true.into(); // Will not be used.
+                    let acc = lowerer.owned_non_aliased_predicate(
+                        CallContext::BuiltinMethod,
+                        ty,
+                        ty,
+                        place.clone(),
+                        root_address.clone(),
+                        snapshot,
+                        None,
+                    )?;
+                    let snap_call = lowerer.owned_non_aliased_snap(
+                        CallContext::BuiltinMethod,
+                        ty,
+                        ty,
+                        place,
+                        root_address,
+                        predicate.place.position(),
+                    )?;
+                    (acc, snap_call)
+                };
                 self.snap_calls.push((predicate.place.clone(), snap_call));
                 acc
             }
@@ -250,6 +267,25 @@ impl<'p, 'v: 'p, 'tcx: 'v> IntoSnapshotLowerer<'p, 'v, 'tcx> for SelfFramingAsse
             _ => unimplemented!("{acc_predicate}"),
         };
         Ok(expression)
+    }
+
+    fn pointer_deref_to_snapshot(
+        &mut self,
+        lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+        deref: &vir_mid::Deref,
+        base_snapshot: vir_low::Expression,
+        _expect_math_bool: bool,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
+        let heap = self
+            .heap
+            .clone()
+            .expect("This function should be reachable only when heap is Some");
+        lowerer.pointer_target_snapshot_in_heap(
+            deref.base.get_type(),
+            heap,
+            base_snapshot,
+            deref.position,
+        )
     }
 
     fn call_context(&self) -> CallContext {

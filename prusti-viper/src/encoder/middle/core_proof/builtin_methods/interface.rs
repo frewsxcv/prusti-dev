@@ -849,12 +849,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                                 SelfFramingAssertionToSnapshot::for_assign_precondition(
                                     arguments.clone(),
                                     decl.fields.clone(),
+                                    heap.clone(),
                                 );
                             for assertion in &invariant {
-                                pres.push(
-                                    invariant_encoder
-                                        .expression_to_snapshot(self, assertion, true)?,
-                                );
+                                let encoded_assertion = invariant_encoder
+                                    .expression_to_snapshot(self, assertion, true)?;
+                                pres.push(encoded_assertion);
                             }
                             // Create the snapshot constructor.
                             let deref_fields =

@@ -867,6 +867,37 @@ impl Expression {
         collector.owned_places
     }
 
+    /// Returns the expression with all pure parts removed and implications
+    /// converted into conditionals.
+    ///
+    /// This method is different from `collect_guarded_owned_places` in that it
+    /// still returns a single expression preserving most of the original
+    /// structure.
+    pub fn convert_into_permission_expression(self) -> Expression {
+        struct Remover {}
+        impl<'a> ExpressionFolder for Remover {
+            fn fold_expression(&mut self, expression: Expression) -> Expression {
+                if expression.is_pure() {
+                    true.into()
+                } else {
+                    default_fold_expression(self, expression)
+                }
+            }
+            fn fold_binary_op_enum(&mut self, binary_op: BinaryOp) -> Expression {
+                if binary_op.op_kind == BinaryOpKind::Implies {
+                    let guard = *binary_op.left;
+                    let then_expr = self.fold_expression(*binary_op.right);
+                    let else_expr = false.into();
+                    Expression::conditional(guard, then_expr, else_expr, binary_op.position)
+                } else {
+                    Expression::BinaryOp(self.fold_binary_op(binary_op))
+                }
+            }
+        }
+        let mut remover = Remover {};
+        remover.fold_expression(self)
+    }
+
     /// Returns places that contain dereferences with their path conditions.
     pub fn collect_guarded_dereferenced_places(&self) -> Vec<(Expression, Expression)> {
         struct Collector {

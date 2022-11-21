@@ -32,10 +32,10 @@ use crate::encoder::{
         },
         references::ReferencesInterface,
         snapshots::{
-            BuiltinFunctionsInterface, IntoBuiltinMethodSnapshot, IntoProcedureFinalSnapshot,
-            IntoProcedureSnapshot, IntoPureSnapshot, IntoSnapshot, IntoSnapshotLowerer,
-            SnapshotBytesInterface, SnapshotValidityInterface, SnapshotValuesInterface,
-            SnapshotVariablesInterface,
+            AssertionToSnapshotConstructor, BuiltinFunctionsInterface, IntoBuiltinMethodSnapshot,
+            IntoProcedureFinalSnapshot, IntoProcedureSnapshot, IntoPureSnapshot, IntoSnapshot,
+            IntoSnapshotLowerer, SnapshotBytesInterface, SnapshotValidityInterface,
+            SnapshotValuesInterface, SnapshotVariablesInterface,
         },
         type_layouts::TypeLayoutsInterface,
     },
@@ -832,14 +832,40 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         // FIXME: Code duplication with encode_owned_non_aliased_snapshot.
                         let heap = if self.use_heap_variable()? {
                             let heap_name = self.heap_variable_name()?;
-                            Some(vir_low::VariableDecl::new(heap_name, self.heap_type()?))
+                            let heap = vir_low::VariableDecl::new(heap_name, self.heap_type()?);
+                            parameters.push(heap.clone());
+                            Some(heap)
                         } else {
                             None
                         };
                         // FIXME: Do not hardcode variables here.
                         // Instead pass in the original ones.
                         var_decls!(target_place: Place, target_address: Address);
-                        // let decl = self.encoder.get_type_decl_mid(&value.ty)?.unwrap_struct();
+                        let decl = self.encoder.get_type_decl_mid(&value.ty)?.unwrap_struct();
+                        if let Some(invariant) = decl.structural_invariant {
+                            assert_eq!(arguments.len(), decl.fields.len());
+                            let deref_fields =
+                                self.structural_invariant_to_deref_fields(&invariant)?;
+                            let mut constructor_encoder =
+                                AssertionToSnapshotConstructor::for_assign_aggregate_postcondition(
+                                    result_type,
+                                    arguments,
+                                    decl.fields,
+                                    deref_fields,
+                                    heap,
+                                    position,
+                                );
+                            let invariant_expression = invariant.into_iter().conjoin();
+                            let permission_expression =
+                                invariant_expression.convert_into_permission_expression();
+                            constructor_encoder.expression_to_snapshot(
+                                self,
+                                &permission_expression,
+                                true,
+                            )?
+                        } else {
+                            self.construct_struct_snapshot(&value.ty, arguments, position)?
+                        }
                         // if let Some(invariant) = &decl.structural_invariant {
                         //     let mut assertion_encoder =
                         //         AssertionEncoder::new(&decl, arguments.clone(), &heap);
@@ -938,21 +964,22 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                         //         pres.push(low_assertion);
                         //     }
                         // }
-                        if self.use_heap_variable()? {
-                            parameters.push(heap.clone().unwrap());
-                            // TODO: add the invariant to the precondition with
-                            // deref fields being the parameters of this method
-                            self.construct_struct_snapshot(&value.ty, arguments, position)?
-                        } else {
-                            self.owned_non_aliased_snap(
-                                CallContext::BuiltinMethod,
-                                &value.ty,
-                                &value.ty,
-                                target_place.into(),
-                                target_address.into(),
-                                position,
-                            )?
-                        }
+
+                        // if self.use_heap_variable()? {
+                        //     parameters.push(heap.clone().unwrap());
+                        //     // TODO: add the invariant to the precondition with
+                        //     // deref fields being the parameters of this method
+                        //     self.construct_struct_snapshot(&value.ty, arguments, position)?
+                        // } else {
+                        //     self.owned_non_aliased_snap(
+                        //         CallContext::BuiltinMethod,
+                        //         &value.ty,
+                        //         &value.ty,
+                        //         target_place.into(),
+                        //         target_address.into(),
+                        //         position,
+                        //     )?
+                        // }
                     }
                     vir_mid::Type::Array(value_ty) => vir_low::Expression::container_op(
                         vir_low::ContainerOpKind::SeqConstructor,
@@ -962,9 +989,9 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                     ),
                     ty => unimplemented!("{}", ty),
                 };
-                posts.push(
-                    self.encode_snapshot_valid_call_for_type(assigned_value.clone(), result_type)?,
-                );
+                // posts.push(
+                //     self.encode_snapshot_valid_call_for_type(assigned_value.clone(), result_type)?,
+                // );
                 assigned_value
             }
         };

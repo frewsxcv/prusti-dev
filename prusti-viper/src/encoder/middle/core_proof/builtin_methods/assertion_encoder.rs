@@ -19,6 +19,7 @@ use vir_crate::{
     middle::{self as vir_mid, operations::ty::Typed},
 };
 
+// TODO: Delete this file.
 pub(in super::super::super) struct AssertionEncoder<'a> {
     /// A map from field names to arguments that are being assigned to these
     /// fields.

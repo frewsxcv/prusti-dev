@@ -7,7 +7,11 @@ mod snap;
 mod pure_heap;
 /// The snapshot validity assertion.
 mod validity;
+/// Structural invariant that needs to be translated into a snapshot
+/// constructor.
+mod constructor;
 
 pub(in super::super::super::super) use self::{
-    self_framing::SelfFramingAssertionToSnapshot, validity::ValidityAssertionToSnapshot,
+    constructor::AssertionToSnapshotConstructor, self_framing::SelfFramingAssertionToSnapshot,
+    validity::ValidityAssertionToSnapshot,
 };

@@ -20,7 +20,9 @@ mod pure;
 mod assertions;
 
 pub(in super::super) use self::{
-    assertions::{SelfFramingAssertionToSnapshot, ValidityAssertionToSnapshot},
+    assertions::{
+        AssertionToSnapshotConstructor, SelfFramingAssertionToSnapshot, ValidityAssertionToSnapshot,
+    },
     builtin_methods::IntoBuiltinMethodSnapshot,
     common::IntoSnapshotLowerer,
     context_independent::IntoSnapshot,

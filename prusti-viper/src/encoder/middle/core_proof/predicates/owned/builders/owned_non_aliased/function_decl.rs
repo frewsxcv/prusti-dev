@@ -14,8 +14,8 @@ use crate::encoder::{
         },
         references::ReferencesInterface,
         snapshots::{
-            IntoPureSnapshot, IntoSnapshotLowerer, SnapshotBytesInterface,
-            SnapshotValidityInterface, SnapshotValuesInterface,
+            AssertionToSnapshotConstructor, IntoPureSnapshot, IntoSnapshotLowerer,
+            SnapshotBytesInterface, SnapshotValidityInterface, SnapshotValuesInterface,
         },
         type_layouts::TypeLayoutsInterface,
     },
@@ -23,7 +23,7 @@ use crate::encoder::{
 
 use vir_crate::{
     common::{
-        expression::{ExpressionIterator, QuantifierHelpers},
+        expression::{BinaryOperationHelpers, ExpressionIterator, QuantifierHelpers},
         position::Positioned,
     },
     low::{self as vir_low},
@@ -270,32 +270,39 @@ impl<'l, 'p, 'v, 'tcx> OwnedNonAliasedSnapFunctionBuilder<'l, 'p, 'v, 'tcx> {
         self.add_bytes_snapshot_equality_with(&address_type, target_address_snapshot)
     }
 
-    pub(in super::super::super) fn create_field_snapshot_equality(
+    fn create_field_snap_call(
         &mut self,
         field: &vir_mid::FieldDecl,
     ) -> SpannedEncodingResult<vir_low::Expression> {
-        use vir_low::macros::*;
-        let result = self.inner.result()?;
         let field_place = self.inner.lowerer.encode_field_place(
             self.inner.ty,
             field,
             self.place.clone().into(),
             self.inner.position,
         )?;
-        let field_snapshot = self.inner.lowerer.obtain_struct_field_snapshot(
-            self.inner.ty,
-            field,
-            result.into(),
-            self.inner.position,
-        )?;
-        let snap_call = self.inner.lowerer.owned_non_aliased_snap(
+        self.inner.lowerer.owned_non_aliased_snap(
             CallContext::BuiltinMethod,
             &field.ty,
             &field.ty,
             field_place,
             self.root_address.clone().into(),
             self.inner.position,
+        )
+    }
+
+    pub(in super::super::super) fn create_field_snapshot_equality(
+        &mut self,
+        field: &vir_mid::FieldDecl,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
+        use vir_low::macros::*;
+        let result = self.inner.result()?;
+        let field_snapshot = self.inner.lowerer.obtain_struct_field_snapshot(
+            self.inner.ty,
+            field,
+            result.into(),
+            self.inner.position,
         )?;
+        let snap_call = self.create_field_snap_call(&field)?;
         Ok(expr! {
             [field_snapshot] == [snap_call]
         })
@@ -457,12 +464,34 @@ impl<'l, 'p, 'v, 'tcx> OwnedNonAliasedSnapFunctionBuilder<'l, 'p, 'v, 'tcx> {
         &mut self,
         decl: &vir_mid::type_decl::Struct,
     ) -> SpannedEncodingResult<()> {
-        if let Some(invariant) = &decl.structural_invariant {
-            use vir_low::macros::*;
+        if let Some(invariant) = decl.structural_invariant.clone() {
+            let mut regular_field_arguments = Vec::new();
+            for field in &decl.fields {
+                regular_field_arguments.push(self.create_field_snap_call(field)?);
+            }
             let result = self.inner.result()?;
-            let assertion = invariant.iter().cloned().conjoin();
-            let owned_places = assertion.collect_owned_places();
-
+            let deref_fields = self
+                .inner
+                .lowerer
+                .structural_invariant_to_deref_fields(&invariant)?;
+            let mut constructor_encoder = AssertionToSnapshotConstructor::for_function_body(
+                self.inner.ty,
+                regular_field_arguments,
+                decl.fields.clone(),
+                deref_fields,
+                self.inner.position,
+            );
+            let invariant_expression = invariant.into_iter().conjoin();
+            let permission_expression = invariant_expression.convert_into_permission_expression();
+            let constructor = constructor_encoder.expression_to_snapshot(
+                self.inner.lowerer,
+                &permission_expression,
+                true,
+            )?;
+            self.add_unfolding_postcondition(vir_low::Expression::equals(
+                result.into(),
+                constructor,
+            ))?;
             //     let mut equalities = Vec::new();
             //     for assertion in invariant {
             //         for (guard, place) in assertion.collect_guarded_owned_places() {

@@ -67,7 +67,7 @@ impl<'l, 'p, 'v, 'tcx> PredicateEncoder<'l, 'p, 'v, 'tcx> {
         builder.create_parameters()?;
         builder.add_owned_precondition()?;
         builder.add_validity_postcondition()?;
-        match &type_decl {
+        match type_decl {
             vir_mid::TypeDecl::Bool
             | vir_mid::TypeDecl::Int(_)
             | vir_mid::TypeDecl::Float(_)

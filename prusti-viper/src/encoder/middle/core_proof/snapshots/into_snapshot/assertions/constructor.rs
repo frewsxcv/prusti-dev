@@ -72,6 +72,35 @@ impl<'a> AssertionToSnapshotConstructor<'a> {
         }
     }
 
+    pub(in super::super::super::super::super) fn for_function_body(
+        ty: &'a vir_mid::Type,
+        regular_field_arguments: Vec<vir_low::Expression>,
+        fields: Vec<vir_mid::FieldDecl>,
+        deref_fields: Vec<(vir_mid::Expression, String, vir_low::Type)>,
+        position: vir_low::Position,
+    ) -> Self {
+        let field_replacement_map = fields
+            .into_iter()
+            .zip(regular_field_arguments.iter().cloned())
+            .collect();
+        let deref_fields = deref_fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, (e, _, _))| (i + regular_field_arguments.len(), e))
+            .collect();
+        Self {
+            ty,
+            regular_field_arguments,
+            field_replacement_map,
+            deref_fields,
+            framed_places: Vec::new(),
+            heap: None,
+            is_in_old_state: false,
+            found_conditional: false,
+            position,
+        }
+    }
+
     // FIXME: Code duplication.
     fn pointer_deref_into_address<'p, 'v, 'tcx>(
         &mut self,

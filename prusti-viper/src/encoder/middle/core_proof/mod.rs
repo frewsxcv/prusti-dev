@@ -20,5 +20,6 @@ mod transformations;
 mod type_layouts;
 mod types;
 mod utils;
+mod heap;
 
 pub(crate) use self::interface::{MidCoreProofEncoderInterface, MidCoreProofEncoderState};

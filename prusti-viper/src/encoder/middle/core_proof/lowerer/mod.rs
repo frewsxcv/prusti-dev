@@ -6,6 +6,7 @@ use super::{
     adts::AdtsState,
     builtin_methods::BuiltinMethodsState,
     compute_address::ComputeAddressState,
+    heap::HeapState,
     into_low::IntoLow,
     lifetimes::LifetimesState,
     places::PlacesState,
@@ -102,6 +103,7 @@ pub(super) struct Lowerer<'p, 'v: 'p, 'tcx: 'v> {
     pub(super) adts_state: AdtsState,
     pub(super) lifetimes_state: LifetimesState,
     pub(super) places_state: PlacesState,
+    pub(super) heap_state: HeapState,
 }
 
 impl<'p, 'v: 'p, 'tcx: 'v> Lowerer<'p, 'v, 'tcx> {
@@ -123,6 +125,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> Lowerer<'p, 'v, 'tcx> {
             adts_state: Default::default(),
             lifetimes_state: Default::default(),
             places_state: Default::default(),
+            heap_state: Default::default(),
         }
     }
 

@@ -19,6 +19,7 @@ use crate::encoder::{
         compute_address::ComputeAddressInterface,
         errors::ErrorsInterface,
         footprint::FootprintInterface,
+        heap::HeapInterface,
         lifetimes::LifetimesInterface,
         lowerer::{
             DomainsLowererInterface, Lowerer, MethodsLowererInterface, PredicatesLowererInterface,
@@ -2437,14 +2438,14 @@ impl<'p, 'v: 'p, 'tcx: 'v> BuiltinMethodsInterface for Lowerer<'p, 'v, 'tcx> {
                         position,
                     )?;
                     let heap = self.heap_variable_version_at_label(&None)?;
-                    statements.push(vir_low::Statement::assume(
-                        vir_low::Expression::container_op_no_pos(
-                            vir_low::ContainerOpKind::MapContains,
-                            heap.ty.clone(),
-                            vec![heap.into(), address],
-                        ),
-                        position,
-                    ));
+                    // statements.push(vir_low::Statement::assume(
+                    //     vir_low::Expression::container_op_no_pos(
+                    //         vir_low::ContainerOpKind::MapContains,
+                    //         heap.ty.clone(),
+                    //         vec![heap.into(), address],
+                    //     ),
+                    //     position,
+                    // ));
                     let heap_chunk = self.pointer_target_snapshot(
                         target.get_type(),
                         &None,

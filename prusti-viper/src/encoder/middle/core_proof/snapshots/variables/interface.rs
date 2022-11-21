@@ -3,6 +3,7 @@ use crate::encoder::{
     high::types::HighTypeEncoderInterface,
     middle::core_proof::{
         addresses::AddressesInterface,
+        heap::HeapInterface,
         lowerer::{Lowerer, VariablesLowererInterface},
         pointers::PointersInterface,
         references::ReferencesInterface,
@@ -113,12 +114,18 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                             self.pointer_address(parent.get_type(), old_snapshot, position)?;
                         statements.push(vir_low::Statement::assign(
                             new_heap,
-                            vir_low::Expression::container_op(
-                                vir_low::ContainerOpKind::MapUpdate,
-                                self.heap_type()?,
-                                vec![old_heap.into(), address, fresh_heap_chunk.into()],
+                            self.heap_update(
+                                old_heap.into(),
+                                address,
+                                fresh_heap_chunk.clone().into(),
                                 position,
-                            ),
+                            )?,
+                            // vir_low::Expression::container_op(
+                            //     vir_low::ContainerOpKind::MapUpdate,
+                            //     self.heap_type()?,
+                            //     vec![old_heap.into(), address, fresh_heap_chunk.into()],
+                            //     position,
+                            // ),
                             position,
                         ));
                         return Ok((old_target_snapshot, heap_chunk));

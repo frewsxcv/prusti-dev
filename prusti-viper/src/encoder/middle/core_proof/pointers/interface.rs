@@ -2,6 +2,7 @@ use crate::encoder::{
     errors::SpannedEncodingResult,
     middle::core_proof::{
         addresses::AddressesInterface,
+        heap::HeapInterface,
         lowerer::{DomainsLowererInterface, Lowerer},
         snapshots::{IntoSnapshot, SnapshotValuesInterface, SnapshotVariablesInterface},
         type_layouts::TypeLayoutsInterface,
@@ -40,8 +41,6 @@ pub(in super::super) trait PointersInterface {
         snapshot: vir_low::Expression,
         position: vir_low::Position,
     ) -> SpannedEncodingResult<vir_low::Expression>;
-    fn heap_chunk_type(&mut self) -> SpannedEncodingResult<vir_low::Type>;
-    fn heap_type(&mut self) -> SpannedEncodingResult<vir_low::Type>;
     fn heap_chunk_to_snapshot(
         &mut self,
         ty: &vir_mid::Type,
@@ -85,11 +84,12 @@ impl<'p, 'v: 'p, 'tcx: 'v> PointersInterface for Lowerer<'p, 'v, 'tcx> {
         position: vir_low::Position,
     ) -> SpannedEncodingResult<vir_low::Expression> {
         let address = self.pointer_address(ty, snapshot, position)?;
-        let heap_chunk = vir_low::Expression::container_op_no_pos(
-            vir_low::ContainerOpKind::MapLookup,
-            heap.ty.clone(),
-            vec![heap.into(), address],
-        );
+        let heap_chunk = self.heap_lookup(heap.into(), address, position)?;
+        // let heap_chunk = vir_low::Expression::container_op_no_pos(
+        //     vir_low::ContainerOpKind::MapLookup,
+        //     heap.ty.clone(),
+        //     vec![heap.into(), address],
+        // );
         let pointer_type = ty.clone().unwrap_pointer();
         self.heap_chunk_to_snapshot(&pointer_type.target_type, heap_chunk, position)
     }
@@ -124,15 +124,6 @@ impl<'p, 'v: 'p, 'tcx: 'v> PointersInterface for Lowerer<'p, 'v, 'tcx> {
             //     position,
             // )
         }
-    }
-    fn heap_chunk_type(&mut self) -> SpannedEncodingResult<vir_low::Type> {
-        self.domain_type("HeapChunk")
-    }
-    fn heap_type(&mut self) -> SpannedEncodingResult<vir_low::Type> {
-        Ok(vir_low::Type::map(
-            self.address_type()?,
-            self.heap_chunk_type()?,
-        ))
     }
     fn heap_chunk_to_snapshot(
         &mut self,

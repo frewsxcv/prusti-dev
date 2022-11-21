@@ -648,6 +648,14 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             }
         }
 
+        let assume_statement = self.encoder.set_statement_error_ctxt(
+            vir_high::Statement::assume_no_pos(false.into()),
+            span,
+            ErrorCtxt::UnexpectedAssumeEndMethodPostconditionFraming,
+            self.def_id,
+        )?;
+        block_builder.add_statement(assume_statement);
+
         block_builder.build();
         procedure_builder.set_entry(entry_label);
         Ok(())

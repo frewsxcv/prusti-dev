@@ -197,6 +197,9 @@ pub enum ErrorCtxt {
     /// Note: This can also be reported when the underlying solver failing to
     /// prove that the postcondition implies itself.
     MethodPostconditionFraming,
+    /// An unexpected error when assuming false to end method postcondition
+    /// framing check.
+    UnexpectedAssumeEndMethodPostconditionFraming,
     // /// Permission error when dereferencing a raw pointer.
     // EnsureOwnedPredicate,
 }

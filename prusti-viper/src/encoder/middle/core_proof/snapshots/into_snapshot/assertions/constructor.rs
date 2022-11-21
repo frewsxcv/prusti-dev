@@ -132,20 +132,24 @@ impl<'a> AssertionToSnapshotConstructor<'a> {
                 let ty = deref_field.get_type();
                 let deref_field_snapshot = if self.framed_places.contains(deref_field) {
                     // The place is framed, generate the snap call.
-                    let place = lowerer.encode_expression_as_place(deref_field)?;
-                    let root_address = self.pointer_deref_into_address(lowerer, deref_field)?;
-                    let snap_call = lowerer.owned_non_aliased_snap(
-                        CallContext::BuiltinMethod,
-                        ty,
-                        ty,
-                        place,
-                        root_address,
-                        self.position,
-                    )?;
-                    if self.is_in_old_state {
-                        vir_low::Expression::labelled_old(None, snap_call, self.position)
+                    if self.heap.is_some() {
+                        self.expression_to_snapshot(lowerer, deref_field, expect_math_bool)?
                     } else {
-                        snap_call
+                        let place = lowerer.encode_expression_as_place(deref_field)?;
+                        let root_address = self.pointer_deref_into_address(lowerer, deref_field)?;
+                        let snap_call = lowerer.owned_non_aliased_snap(
+                            CallContext::BuiltinMethod,
+                            ty,
+                            ty,
+                            place,
+                            root_address,
+                            self.position,
+                        )?;
+                        if self.is_in_old_state {
+                            vir_low::Expression::labelled_old(None, snap_call, self.position)
+                        } else {
+                            snap_call
+                        }
                     }
                 } else {
                     // The place is not framed. Create a dangling (null) snapshot.
@@ -259,6 +263,26 @@ impl<'a, 'p, 'v: 'p, 'tcx: 'v> IntoSnapshotLowerer<'p, 'v, 'tcx>
             }
         }
         Ok(true.into())
+    }
+
+    // FIXME: Code duplication.
+    fn pointer_deref_to_snapshot(
+        &mut self,
+        lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+        deref: &vir_mid::Deref,
+        base_snapshot: vir_low::Expression,
+        _expect_math_bool: bool,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
+        let heap = self
+            .heap
+            .clone()
+            .expect("This function should be reachable only when heap is Some");
+        lowerer.pointer_target_snapshot_in_heap(
+            deref.base.get_type(),
+            heap,
+            base_snapshot,
+            deref.position,
+        )
     }
 
     fn call_context(&self) -> CallContext {

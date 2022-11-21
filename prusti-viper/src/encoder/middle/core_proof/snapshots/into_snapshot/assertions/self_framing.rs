@@ -269,6 +269,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> IntoSnapshotLowerer<'p, 'v, 'tcx> for SelfFramingAsse
         Ok(expression)
     }
 
+    // FIXME: Code duplication.
     fn pointer_deref_to_snapshot(
         &mut self,
         lowerer: &mut Lowerer<'p, 'v, 'tcx>,

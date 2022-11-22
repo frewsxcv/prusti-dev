@@ -1833,6 +1833,13 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 block_builder.add_statement(exhale_statement);
             }
         }
+        let heap_havoc_statement = self.encoder.set_statement_error_ctxt(
+            vir_high::Statement::heap_havoc_no_pos(),
+            span,
+            ErrorCtxt::ExhaleMethodPrecondition,
+            self.def_id,
+        )?;
+        block_builder.add_statement(heap_havoc_statement);
 
         if self.encoder.env().query.is_closure(called_def_id) {
             // Closure calls are wrapped around std::ops::Fn::call(), which receives

@@ -94,6 +94,9 @@ impl IntoLow for vir_mid::Statement {
                 )?;
                 Ok(statements)
             }
+            Self::HeapHavoc(statement) => {
+                unimplemented!()
+            }
             Self::InhaleExpression(statement) => Ok(vec![Statement::inhale(
                 statement.expression.to_procedure_assertion(lowerer)?,
                 statement.position,

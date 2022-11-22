@@ -87,6 +87,9 @@ impl CollectPermissionChanges for vir_typed::Statement {
             vir_typed::Statement::GhostHavoc(statement) => {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
+            vir_typed::Statement::HeapHavoc(statement) => {
+                statement.collect(encoder, consumed_permissions, produced_permissions)
+            }
             vir_typed::Statement::GhostAssign(statement) => {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
@@ -175,6 +178,17 @@ impl CollectPermissionChanges for vir_typed::Statement {
                 statement.collect(encoder, consumed_permissions, produced_permissions)
             }
         }
+    }
+}
+
+impl CollectPermissionChanges for vir_typed::HeapHavoc {
+    fn collect<'v, 'tcx>(
+        &self,
+        _encoder: &mut Encoder<'v, 'tcx>,
+        _consumed_permissions: &mut Vec<Permission>,
+        _produced_permissions: &mut Vec<Permission>,
+    ) -> SpannedEncodingResult<()> {
+        Ok(())
     }
 }
 

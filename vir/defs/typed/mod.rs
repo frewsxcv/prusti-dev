@@ -22,7 +22,7 @@ pub use self::{
         statement::{
             Assert, Assign, Assume, BorShorten, CloseFracRef, CloseMutRef, Comment, Consume,
             CopyPlace, DeadInclusion, DeadLifetime, EndLft, ExhaleExpression, ExhalePredicate,
-            ForgetInitialization, GhostAssign, GhostHavoc, Havoc, InhaleExpression,
+            ForgetInitialization, GhostAssign, GhostHavoc,HeapHavoc, Havoc, InhaleExpression,
             InhalePredicate, Join, LeakAll, LifetimeReturn, LifetimeTake, LoopInvariant, MovePlace,
             NewLft, ObtainMutRef, OldLabel, OpenFracRef, OpenMutRef, Pack, RestoreRawBorrowed,
             SetUnionVariant, Split, Statement, Unpack, WriteAddress, WritePlace,

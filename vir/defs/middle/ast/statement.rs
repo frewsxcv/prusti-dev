@@ -23,6 +23,7 @@ pub enum Statement {
     Consume(Consume),
     Havoc(Havoc),
     GhostHavoc(GhostHavoc),
+    HeapHavoc(HeapHavoc),
     FoldOwned(FoldOwned),
     UnfoldOwned(UnfoldOwned),
     FoldRef(FoldRef),
@@ -100,6 +101,12 @@ pub struct Havoc {
 #[display(fmt = "ghost-havoc {}", variable)]
 pub struct GhostHavoc {
     pub variable: VariableDecl,
+    pub position: Position,
+}
+
+#[display(fmt = "heap-havoc")]
+/// Havoc the heap.
+pub struct HeapHavoc {
     pub position: Position,
 }
 

@@ -483,11 +483,8 @@ impl<'l, 'p, 'v, 'tcx> OwnedNonAliasedSnapFunctionBuilder<'l, 'p, 'v, 'tcx> {
             );
             let invariant_expression = invariant.into_iter().conjoin();
             let permission_expression = invariant_expression.convert_into_permission_expression();
-            let constructor = constructor_encoder.expression_to_snapshot(
-                self.inner.lowerer,
-                &permission_expression,
-                true,
-            )?;
+            let constructor = constructor_encoder
+                .expression_to_snapshot_constructor(self.inner.lowerer, &permission_expression)?;
             self.add_unfolding_postcondition(vir_low::Expression::equals(
                 result.into(),
                 constructor,

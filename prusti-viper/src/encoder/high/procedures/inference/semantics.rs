@@ -18,26 +18,29 @@ pub(in super::super) fn collect_permission_changes<'v, 'tcx>(
         &mut consumed_permissions,
         &mut produced_permissions,
     )?;
-    // consumed_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
-    // produced_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
-    remove_after_pointer_deref(&mut consumed_permissions);
-    remove_after_pointer_deref(&mut produced_permissions);
+    consumed_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
+    produced_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
+    // remove_after_pointer_deref(&mut consumed_permissions);
+    // remove_after_pointer_deref(&mut produced_permissions);
     Ok((consumed_permissions, produced_permissions))
 }
 
-fn remove_after_pointer_deref(permissions: &mut Vec<Permission>) {
-    for permission in permissions {
-        match permission {
-            Permission::MemoryBlock(place) |
-            Permission::Owned(place) => {
-                if let Some(pointer_place) = place.get_first_dereferenced_pointer() {
-                    *place = pointer_place.clone();
-                }
-            },
-            Permission::MutBorrowed(_) => unreachable!(),
-        }
-    }
-}
+// fn remove_after_pointer_deref(permissions: &mut Vec<Permission>) {
+//     permissions.retain_mut(|permission| {
+//         match permission {
+//             Permission::MemoryBlock(place) => {
+//                 !place.is_behind_pointer_dereference()
+//             }
+//             Permission::Owned(place) => {
+//                 if let Some(pointer_place) = place.get_first_dereferenced_pointer() {
+//                     *place = pointer_place.clone();
+//                 }
+//                 true
+//             }
+//             Permission::MutBorrowed(_) => unreachable!(),
+//         }
+//     });
+// }
 
 trait CollectPermissionChanges {
     #[allow(clippy::ptr_arg)] // Clippy false positive.
@@ -358,6 +361,9 @@ impl CollectPermissionChanges for vir_typed::CopyPlace {
         consumed_permissions: &mut Vec<Permission>,
         produced_permissions: &mut Vec<Permission>,
     ) -> SpannedEncodingResult<()> {
+        // if let Some(source_pointer_place) = self.source.get_first_dereferenced_pointer() {
+
+        // }
         consumed_permissions.push(Permission::MemoryBlock(self.target.clone()));
         consumed_permissions.push(Permission::Owned(self.source.clone()));
         produced_permissions.push(Permission::Owned(self.target.clone()));
@@ -696,25 +702,41 @@ impl CollectPermissionChanges for vir_typed::SetUnionVariant {
     }
 }
 
+fn add_struct_expansion(
+    place: &vir_typed::Expression,
+    fields: Vec<vir_typed::FieldDecl>,
+    permissions: &mut Vec<Permission>,
+) {
+    let position = place.position();
+    for field in fields {
+        permissions.push(Permission::Owned(vir_typed::Expression::field(
+            place.clone(),
+            field,
+            position,
+        )));
+    }
+}
+
 impl CollectPermissionChanges for vir_typed::Pack {
     fn collect<'v, 'tcx>(
         &self,
         encoder: &mut Encoder<'v, 'tcx>,
-        _consumed_permissions: &mut Vec<Permission>,
+        consumed_permissions: &mut Vec<Permission>,
         produced_permissions: &mut Vec<Permission>,
     ) -> SpannedEncodingResult<()> {
         if self.place.is_behind_pointer_dereference() {
             produced_permissions.push(Permission::Owned(self.place.clone()));
         } else {
             let type_decl = encoder.encode_type_def_typed(self.place.get_type())?;
-            if let vir_typed::TypeDecl::Struct(decl) = &type_decl {
+            if let vir_typed::TypeDecl::Struct(decl) = type_decl {
                 if decl.is_manually_managed_type() {
                     produced_permissions.push(Permission::Owned(self.place.clone()));
+                    add_struct_expansion(&self.place, decl.fields, consumed_permissions);
                 } else {
                     unimplemented!(
-                        "Unpacking an automatically managed type: {:?}\n{:?}",
+                        "Unpacking an automatically managed type: {}\n{}",
                         self.place,
-                        type_decl
+                        self.place.get_type(),
                     );
                 }
             } else {
@@ -733,25 +755,26 @@ impl CollectPermissionChanges for vir_typed::Unpack {
         &self,
         encoder: &mut Encoder<'v, 'tcx>,
         consumed_permissions: &mut Vec<Permission>,
-        _produced_permissions: &mut Vec<Permission>,
+        produced_permissions: &mut Vec<Permission>,
     ) -> SpannedEncodingResult<()> {
         if self.place.is_behind_pointer_dereference() {
             consumed_permissions.push(Permission::Owned(self.place.clone()));
         } else {
             let type_decl = encoder.encode_type_def_typed(self.place.get_type())?;
-            if let vir_typed::TypeDecl::Struct(decl) = &type_decl {
+            if let vir_typed::TypeDecl::Struct(decl) = type_decl {
                 if decl.is_manually_managed_type() {
                     consumed_permissions.push(Permission::Owned(self.place.clone()));
+                    add_struct_expansion(&self.place, decl.fields, produced_permissions);
                 } else {
                     unimplemented!(
-                        "Unpacking an automatically managed type: {:?}\n{:?}",
+                        "Unpacking an automatically managed type: {}\n{}",
                         self.place,
-                        type_decl
+                        self.place.get_type()
                     );
                 }
             } else {
                 unimplemented!(
-                    "Report a proper error message that only structs can be unfolded: {:?}",
+                    "Report a proper error message that only structs can be unfolded: {}",
                     self.place
                 );
             }

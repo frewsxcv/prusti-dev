@@ -21,7 +21,7 @@ use vir_crate::{
     middle::{self as vir_mid, operations::ty::Typed},
 };
 
-pub(in super::super::super::super::super) struct AssertionToSnapshotConstructor<'a> {
+pub(in super::super::super::super) struct AssertionToSnapshotConstructor<'a> {
     ty: &'a vir_mid::Type,
     /// Arguments for the regular struct fields.
     regular_field_arguments: Vec<vir_low::Expression>,
@@ -42,7 +42,7 @@ pub(in super::super::super::super::super) struct AssertionToSnapshotConstructor<
 }
 
 impl<'a> AssertionToSnapshotConstructor<'a> {
-    pub(in super::super::super::super::super) fn for_assign_aggregate_postcondition(
+    pub(in super::super::super::super) fn for_assign_aggregate_postcondition(
         ty: &'a vir_mid::Type,
         regular_field_arguments: Vec<vir_low::Expression>,
         fields: Vec<vir_mid::FieldDecl>,
@@ -72,7 +72,7 @@ impl<'a> AssertionToSnapshotConstructor<'a> {
         }
     }
 
-    pub(in super::super::super::super::super) fn for_function_body(
+    pub(in super::super::super::super) fn for_function_body(
         ty: &'a vir_mid::Type,
         regular_field_arguments: Vec<vir_low::Expression>,
         fields: Vec<vir_mid::FieldDecl>,
@@ -101,6 +101,65 @@ impl<'a> AssertionToSnapshotConstructor<'a> {
         }
     }
 
+    pub(in super::super::super::super) fn expression_to_snapshot_constructor<'p, 'v, 'tcx>(
+        &mut self,
+        lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+        expression: &vir_mid::Expression,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
+        let constructor_expression = self.expression_to_snapshot(lowerer, expression, true)?;
+        if self.found_conditional {
+            Ok(constructor_expression)
+        } else {
+            self.generate_snapshot_constructor(lowerer)
+        }
+    }
+
+    fn generate_snapshot_constructor<'p, 'v, 'tcx>(
+        &mut self,
+        lowerer: &mut Lowerer<'p, 'v, 'tcx>,
+    ) -> SpannedEncodingResult<vir_low::Expression> {
+        let mut arguments = self.regular_field_arguments.clone();
+        for deref_field in self.deref_fields.clone().values() {
+            let ty = deref_field.get_type();
+            let deref_field_snapshot = if self.framed_places.contains(deref_field) {
+                // The place is framed, generate the snap call.
+                if self.heap.is_some() {
+                    self.expression_to_snapshot(lowerer, deref_field, false)?
+                } else {
+                    let place = lowerer.encode_expression_as_place(deref_field)?;
+                    let root_address = self.pointer_deref_into_address(lowerer, deref_field)?;
+                    let snap_call = lowerer.owned_non_aliased_snap(
+                        CallContext::BuiltinMethod,
+                        ty,
+                        ty,
+                        place,
+                        root_address,
+                        self.position,
+                    )?;
+                    if self.is_in_old_state {
+                        vir_low::Expression::labelled_old(None, snap_call, self.position)
+                    } else {
+                        snap_call
+                    }
+                }
+            } else {
+                // The place is not framed. Create a dangling (null) snapshot.
+                let domain_name = lowerer.encode_snapshot_domain_name(ty)?;
+                let function_name = format!("{}$dangling", domain_name);
+                let return_type = ty.to_snapshot(lowerer)?;
+                lowerer.create_unique_domain_func_app(
+                    domain_name,
+                    function_name,
+                    Vec::new(),
+                    return_type,
+                    self.position,
+                )?
+            };
+            arguments.push(deref_field_snapshot);
+        }
+        lowerer.construct_struct_snapshot(self.ty, arguments, self.position)
+    }
+
     // FIXME: Code duplication.
     fn pointer_deref_into_address<'p, 'v, 'tcx>(
         &mut self,
@@ -127,46 +186,7 @@ impl<'a> AssertionToSnapshotConstructor<'a> {
         let branch_snapshot = self.expression_to_snapshot(lowerer, branch, expect_math_bool)?;
         let expression = if !self.found_conditional {
             // We reached the lowest level, generate the snapshot constructor.
-            let mut arguments = self.regular_field_arguments.clone();
-            for deref_field in self.deref_fields.clone().values() {
-                let ty = deref_field.get_type();
-                let deref_field_snapshot = if self.framed_places.contains(deref_field) {
-                    // The place is framed, generate the snap call.
-                    if self.heap.is_some() {
-                        self.expression_to_snapshot(lowerer, deref_field, expect_math_bool)?
-                    } else {
-                        let place = lowerer.encode_expression_as_place(deref_field)?;
-                        let root_address = self.pointer_deref_into_address(lowerer, deref_field)?;
-                        let snap_call = lowerer.owned_non_aliased_snap(
-                            CallContext::BuiltinMethod,
-                            ty,
-                            ty,
-                            place,
-                            root_address,
-                            self.position,
-                        )?;
-                        if self.is_in_old_state {
-                            vir_low::Expression::labelled_old(None, snap_call, self.position)
-                        } else {
-                            snap_call
-                        }
-                    }
-                } else {
-                    // The place is not framed. Create a dangling (null) snapshot.
-                    let domain_name = lowerer.encode_snapshot_domain_name(ty)?;
-                    let function_name = format!("{}$dangling", domain_name);
-                    let return_type = ty.to_snapshot(lowerer)?;
-                    lowerer.create_unique_domain_func_app(
-                        domain_name,
-                        function_name,
-                        Vec::new(),
-                        return_type,
-                        self.position,
-                    )?
-                };
-                arguments.push(deref_field_snapshot);
-            }
-            lowerer.construct_struct_snapshot(self.ty, arguments, self.position)?
+            self.generate_snapshot_constructor(lowerer)?
         } else {
             branch_snapshot
         };

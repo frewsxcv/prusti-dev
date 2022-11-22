@@ -591,7 +591,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             self.encode_precondition_expressions(&procedure_contract, call_substs, &arguments)?;
         for expression in precondition_expressions {
             if let Some(expression) =
-                self.convert_expression_to_check_mode_call_site(expression, is_unsafe)?
+                self.convert_expression_to_check_mode_call_site(expression, is_unsafe, &arguments)?
             {
                 let exhale_statement = self.encoder.set_statement_error_ctxt(
                     vir_high::Statement::exhale_expression_no_pos(expression),
@@ -634,10 +634,13 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
             ErrorCtxt::ProcedureCall,
             self.def_id,
         )?);
+        let result_place = vec![encoded_target_place.clone()];
         for expression in postcondition_expressions {
-            if let Some(expression) =
-                self.convert_expression_to_check_mode_call_site(expression, is_unsafe)?
-            {
+            if let Some(expression) = self.convert_expression_to_check_mode_call_site(
+                expression,
+                is_unsafe,
+                &result_place,
+            )? {
                 let inhale_statement = self.encoder.set_statement_error_ctxt(
                     vir_high::Statement::inhale_expression_no_pos(expression),
                     span,
@@ -1819,7 +1822,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
         let has_no_precondition = precondition_expressions.is_empty();
         for expression in precondition_expressions {
             if let Some(expression) =
-                self.convert_expression_to_check_mode_call_site(expression, is_unsafe)?
+                self.convert_expression_to_check_mode_call_site(expression, is_unsafe, &arguments)?
             {
                 let exhale_statement = self.encoder.set_statement_error_ctxt(
                     vir_high::Statement::exhale_expression_no_pos(expression),
@@ -1900,6 +1903,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
 
                 self.encode_lft_for_block(*target_block, location, &mut post_call_block_builder)?;
 
+                let result_place = vec![encoded_target_place.clone()];
                 for expression in postcondition_expressions {
                     if let Some(expression) = self.convert_expression_to_check_mode_call_site(
                         expression,
@@ -1907,6 +1911,7 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                         // If we have no precondition, then we can soundly
                         // allways include the function postcondition.
                         has_no_precondition,
+                        &result_place,
                     )? {
                         let inhale_statement = self.encoder.set_statement_error_ctxt(
                             vir_high::Statement::inhale_expression_no_pos(expression),

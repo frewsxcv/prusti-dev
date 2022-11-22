@@ -11,7 +11,7 @@ use vir_crate::{
         expression::{BinaryOperationHelpers, ExpressionIterator},
         position::Positioned,
     },
-    high::{self as vir_high},
+    high::{self as vir_high, operations::ty::Typed},
 };
 
 impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
@@ -60,10 +60,14 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
                 if dereferenced_places.is_empty() {
                     Ok(None)
                 } else {
+                    let framing_places: Vec<vir_high::Expression> = framing_variables
+                        .iter()
+                        .map(|var| var.clone().into())
+                        .collect();
                     let check = construct_framing_assertion(
                         self.encoder,
                         dereferenced_places,
-                        framing_variables,
+                        &framing_places,
                     )?;
                     Ok(Some(check))
                 }
@@ -79,11 +83,32 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
         &mut self,
         expression: vir_high::Expression,
         is_unsafe: bool,
+        framing_arguments: &[vir_high::Expression],
     ) -> SpannedEncodingResult<Option<vir_high::Expression>> {
-        if is_unsafe || self.check_mode != CheckMode::CoreProof {
-            Ok(Some(expression))
-        } else {
-            Ok(None)
+        match self.check_mode {
+            CheckMode::Specifications | CheckMode::Both => Ok(Some(expression)),
+            CheckMode::CoreProof => {
+                let dereferenced_places = expression.collect_guarded_dereferenced_places();
+                let check = if dereferenced_places.is_empty() {
+                    if is_unsafe {
+                        Some(expression)
+                    } else {
+                        None
+                    }
+                } else {
+                    let check = construct_framing_assertion(
+                        self.encoder,
+                        dereferenced_places,
+                        framing_arguments,
+                    )?;
+                    if is_unsafe {
+                        Some(vir_high::Expression::and(expression, check))
+                    } else {
+                        Some(check)
+                    }
+                };
+                Ok(check)
+            }
         }
     }
 }
@@ -91,10 +116,10 @@ impl<'p, 'v: 'p, 'tcx: 'v> ProcedureEncoder<'p, 'v, 'tcx> {
 fn construct_framing_assertion(
     encoder: &mut Encoder,
     dereferenced_places: Vec<(vir_high::Expression, vir_high::Expression)>,
-    framing_variables: &[vir_high::VariableDecl],
+    framing_places: &[vir_high::Expression],
 ) -> SpannedEncodingResult<vir_high::Expression> {
     let type_invariant_framing_places =
-        construct_type_invariant_framing_places(encoder, framing_variables)?;
+        construct_type_invariant_framing_places(encoder, framing_places)?;
     let mut type_invariant_framed_places = Vec::new();
     for (guard, place) in dereferenced_places {
         if is_framed(&place, &type_invariant_framing_places) {
@@ -125,17 +150,17 @@ fn construct_framing_assertion(
 
 fn construct_type_invariant_framing_places(
     encoder: &mut Encoder,
-    framing_variables: &[vir_high::VariableDecl],
+    framing_places: &[vir_high::Expression],
 ) -> SpannedEncodingResult<Vec<vir_high::Expression>> {
     let mut type_invariant_framing_places = Vec::new();
-    for framing_variable in framing_variables {
-        if framing_variable.ty.is_struct() {
+    for framing_place in framing_places {
+        if framing_place.get_type().is_struct() {
             let type_decl = encoder
-                .encode_type_def_high(&framing_variable.ty, true)?
+                .encode_type_def_high(framing_place.get_type(), true)?
                 .unwrap_struct();
             if let Some(invariants) = type_decl.structural_invariant {
                 for expression in invariants {
-                    let expression = expression.replace_self(&framing_variable.clone().into());
+                    let expression = expression.replace_self(framing_place);
                     type_invariant_framing_places.extend(expression.collect_owned_places());
                 }
             }

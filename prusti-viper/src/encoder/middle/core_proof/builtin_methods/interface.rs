@@ -872,11 +872,8 @@ impl<'p, 'v: 'p, 'tcx: 'v> Private for Lowerer<'p, 'v, 'tcx> {
                             let invariant_expression = invariant.into_iter().conjoin();
                             let permission_expression =
                                 invariant_expression.convert_into_permission_expression();
-                            constructor_encoder.expression_to_snapshot(
-                                self,
-                                &permission_expression,
-                                true,
-                            )?
+                            constructor_encoder
+                                .expression_to_snapshot_constructor(self, &permission_expression)?
                         } else {
                             self.construct_struct_snapshot(&value.ty, arguments, position)?
                         }

@@ -11,7 +11,7 @@ mod validity;
 /// constructor.
 mod constructor;
 
-pub(in super::super::super::super) use self::{
+pub(in super::super::super) use self::{
     constructor::AssertionToSnapshotConstructor, self_framing::SelfFramingAssertionToSnapshot,
     validity::ValidityAssertionToSnapshot,
 };

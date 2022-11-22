@@ -18,9 +18,25 @@ pub(in super::super) fn collect_permission_changes<'v, 'tcx>(
         &mut consumed_permissions,
         &mut produced_permissions,
     )?;
-    consumed_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
-    produced_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
+    // consumed_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
+    // produced_permissions.retain(|permission| !permission.place().is_behind_pointer_dereference());
+    remove_after_pointer_deref(&mut consumed_permissions);
+    remove_after_pointer_deref(&mut produced_permissions);
     Ok((consumed_permissions, produced_permissions))
+}
+
+fn remove_after_pointer_deref(permissions: &mut Vec<Permission>) {
+    for permission in permissions {
+        match permission {
+            Permission::MemoryBlock(place) |
+            Permission::Owned(place) => {
+                if let Some(pointer_place) = place.get_first_dereferenced_pointer() {
+                    *place = pointer_place.clone();
+                }
+            },
+            Permission::MutBorrowed(_) => unreachable!(),
+        }
+    }
 }
 
 trait CollectPermissionChanges {

@@ -60,14 +60,14 @@ impl<'p, 'v, 'tcx> super::super::ensurer::Context for Visitor<'p, 'v, 'tcx> {
             vir_typed::TypeDecl::Trusted(_) => unimplemented!("ty: {}", ty),
             vir_typed::TypeDecl::TypeVar(_) => unimplemented!("ty: {}", ty),
             vir_typed::TypeDecl::Struct(decl) => {
-                if decl.is_manually_managed_type() {
-                    let place_span = self.get_span(guiding_place.position()).unwrap();
-                    let error = SpannedEncodingError::incorrect(
-                        "types with structural invariants are required to be managed manually",
-                        place_span,
-                    );
-                    return Err(error);
-                }
+                // if decl.is_manually_managed_type() {
+                //     let place_span = self.get_span(guiding_place.position()).unwrap();
+                //     let error = SpannedEncodingError::incorrect(
+                //         "types with structural invariants are required to be managed manually",
+                //         place_span,
+                //     );
+                //     return Err(error);
+                // }
                 expand_fields(place, decl.fields.iter())
             }
             vir_typed::TypeDecl::Enum(decl) => {

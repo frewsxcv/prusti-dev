@@ -218,6 +218,19 @@ impl Expression {
         }
     }
 
+    pub fn get_first_dereferenced_pointer(&self) -> Option<&Expression> {
+        assert!(self.is_place());
+        if let Some(last_pointer) = self.get_last_dereferenced_pointer() {
+            if let Some(parent) = last_pointer.get_first_dereferenced_pointer() {
+                Some(parent)
+            } else {
+                Some(last_pointer)
+            }
+        } else {
+            None
+        }
+    }
+
     #[must_use]
     pub fn erase_lifetime(self) -> Expression {
         struct DefaultLifetimeEraser {}
